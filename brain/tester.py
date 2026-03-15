@@ -1,88 +1,84 @@
-"""ConnectionTester — fitness function for evaluating TCP optimization strategies.
+"""ConnectionTester — fitness function for evaluating zapret2 lua-desync strategies.
 
-Shadow-mode: test connections go through a separate optimizer instance
-(separate WinDivert filter / network namespace) without affecting main traffic.
+Shadow-mode: test connections go through a separate winws2/nfqws2 instance
+without affecting main traffic.
+
+Strategies are lists of lua-desync calls, e.g.:
+  ["fake:blob=fake_default_tls:ip_ttl=6:tcp_md5", "multisplit:pos=midsld"]
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import platform
 import random
 import shutil
 import subprocess
-import tempfile
 import time
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("svoboda.tester")
 
-# ─── Карта «хороших» комбинаций для mock-тестирования ──────────────────────────
+# ─── Mock fitness: effective combo patterns ──────────────────────────────────
 
 _EFFECTIVE_COMBOS: dict[str, float] = {
-    "disorder2+ttl": 0.85,
-    "fake+ipfrag": 0.80,
-    "multisplit+badseq": 0.75,
-    "overlap+badsum": 0.70,
-    "disorder2+split-pos": 0.90,
-    "fake+ttl+split-pos": 0.95,
-    "disorder2+ttl+badseq": 0.92,
+    "fake+ttl": 0.85,
+    "fake+md5": 0.80,
+    "fakedsplit+ttl": 0.82,
+    "multisplit+midsld": 0.88,
+    "multidisorder+midsld": 0.90,
+    "fake+ttl+md5": 0.92,
+    "fake+autottl": 0.87,
+    "fake+repeats+md5": 0.85,
+    "multidisorder+seqovl": 0.78,
 }
 
 
 def _mock_fitness(flags: list[str]) -> float:
-    """Имитация фитнес-функции на основе известных эффективных комбинаций.
+    """Mock fitness based on known effective zapret2 combos.
 
-    Capped at 0.95 to prevent early exit in GA, ensuring full evolution
-    runs for better data collection.
+    Capped at 0.95 to prevent early GA exit.
     """
     score = 0.1
     flag_str = " ".join(flags)
 
-    if "disorder2" in flag_str and "ttl" in flag_str and "badseq" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["disorder2+ttl+badseq"])
-    if "fake" in flag_str and "ttl" in flag_str and "split-pos" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["fake+ttl+split-pos"])
-    if "disorder2" in flag_str and "split-pos" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["disorder2+split-pos"])
-    if "disorder2" in flag_str and "ttl" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["disorder2+ttl"])
-    if "fake" in flag_str and "ipfrag" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["fake+ipfrag"])
-    if "multisplit" in flag_str and "badseq" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["multisplit+badseq"])
-    if "overlap" in flag_str and "badsum" in flag_str:
-        score = max(score, _EFFECTIVE_COMBOS["overlap+badsum"])
+    if "fake" in flag_str and "ip_ttl" in flag_str and "tcp_md5" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["fake+ttl+md5"])
+    if "multidisorder" in flag_str and "midsld" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["multidisorder+midsld"])
+    if "multisplit" in flag_str and "midsld" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["multisplit+midsld"])
+    if "fake" in flag_str and "autottl" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["fake+autottl"])
+    if "fakedsplit" in flag_str and "ip_ttl" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["fakedsplit+ttl"])
+    if "fake" in flag_str and "tcp_md5" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["fake+md5"])
+    if "fake" in flag_str and "ip_ttl" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["fake+ttl"])
+    if "fake" in flag_str and "repeats" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["fake+repeats+md5"])
+    if "multidisorder" in flag_str and "seqovl" in flag_str:
+        score = max(score, _EFFECTIVE_COMBOS["multidisorder+seqovl"])
 
-    if "ttl" in flag_str:
+    if "ip_ttl" in flag_str:
         score += 0.05
-    if "split-pos" in flag_str:
+    if "tcp_md5" in flag_str:
+        score += 0.03
+    if "midsld" in flag_str:
         score += 0.03
 
-    # Wider noise + cap at 0.95 so GA runs full generations
     noise = random.uniform(-0.10, 0.08)
     return round(max(0.0, min(0.95, score + noise)), 3)
 
-
-# ─── Lua-шаблон для тестовой стратегии ─────────────────────────────────────────
-
-_TEST_LUA_TEMPLATE = """\
--- PLGames Svoboda — test strategy (temporary)
-function sv_desync(conn)
-    return {{
-{flags_lua}
-    }}
-end
-"""
 
 # Successful HTTP codes (site responded, including 403 = server reachable)
 _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
 
 
 class ConnectionTester:
-    """Connection quality tester for optimization strategies."""
+    """Connection quality tester for zapret2 lua-desync strategies."""
 
     def __init__(self, config: dict, mock: bool = True):
         self.config = config
@@ -93,45 +89,48 @@ class ConnectionTester:
         self._base_dir = Path(config.get("_base_dir", "."))
         self._is_windows = platform.system() == "Windows"
         self._zapret_bin = self._resolve_zapret_binary()
+        self._zapret_dir = self._zapret_bin.parent if self._zapret_bin else None
+        self._lua_dir = self._resolve_lua_dir()
         self._shadow_process: Optional[subprocess.Popen] = None
 
     def test_strategy(self, flags: list[str]) -> float:
-        """Оценить стратегию. Возвращает fitness 0.0-1.0."""
+        """Evaluate strategy. Returns fitness 0.0-1.0.
+
+        flags is a list of lua-desync call strings, e.g.:
+          ["fake:blob=fake_default_tls:ip_ttl=6:tcp_md5", "multisplit:pos=midsld"]
+        """
         if self.mock:
             return self._test_mock(flags)
         return self._test_real(flags)
 
-    def test_strategy_async(self, flags: list[str]) -> float:
-        """Async-обёртка для test_strategy."""
-        return asyncio.get_event_loop().run_in_executor(None, self.test_strategy, flags)
-
     # ─── Mock ──────────────────────────────────────────────────────────────
 
     def _test_mock(self, flags: list[str]) -> float:
-        """Mock-тестирование без реальных соединений."""
+        """Mock testing without real connections."""
         fitness = _mock_fitness(flags)
-        logger.debug("Mock test: flags=%s fitness=%.3f", " ".join(flags), fitness)
+        logger.debug("Mock test: flags=%s fitness=%.3f", " | ".join(flags), fitness)
         return fitness
 
     # ─── Real testing ──────────────────────────────────────────────────────
 
     def _test_real(self, flags: list[str]) -> float:
-        """Реальное тестирование через shadow-режим zapret2 + curl."""
+        """Real testing through shadow zapret2 instance + curl."""
         if not self._zapret_bin:
             logger.error("zapret2 binary not found, falling back to mock")
             return self._test_mock(flags)
 
-        # 1. Записать временный lua-файл
-        tmp_lua = self._write_test_lua(flags)
-
         try:
-            # 2. Запустить shadow-экземпляр zapret2
-            self._start_shadow_zapret(tmp_lua, flags)
+            # 1. Start shadow zapret2 with strategy
+            self._start_shadow_zapret(flags)
 
-            # 3. Подождать пока zapret2 поднимется
+            # 2. Wait for zapret2 to initialize
             time.sleep(2)
 
-            # 4. Тестировать каждый хост
+            if self._shadow_process is None or self._shadow_process.poll() is not None:
+                logger.error("Shadow zapret2 failed to start")
+                return 0.0
+
+            # 3. Test each host
             total_tests = len(self.hosts) * self.trials
             successful = 0
 
@@ -147,59 +146,71 @@ class ConnectionTester:
             fitness = 0.0
 
         finally:
-            # 5. Остановить shadow zapret2
+            # 4. Stop shadow zapret2
             self._stop_shadow_zapret()
-            # Удалить временный lua
-            try:
-                tmp_lua.unlink()
-            except OSError:
-                pass
 
         logger.info(
             "Real test: flags=%s fitness=%.3f (%d/%d)",
-            " ".join(flags), fitness, successful, total_tests,
+            " | ".join(flags), fitness, successful, total_tests,
         )
         return round(fitness, 3)
 
     # ─── Shadow zapret2 management ─────────────────────────────────────────
 
-    def _start_shadow_zapret(self, lua_path: Path, flags: list[str]) -> None:
-        """Запустить отдельный экземпляр zapret2 для тестирования."""
+    def _start_shadow_zapret(self, flags: list[str]) -> None:
+        """Start separate zapret2 instance for testing."""
         self._stop_shadow_zapret()
 
         cmd = [str(self._zapret_bin)]
 
         if self._is_windows:
-            # Windows: winws2 с WinDivert
-            # Используем отдельный filter для shadow-режима (порт 44344)
+            # Windows: winws2 with WinDivert
             cmd.extend([
-                "--wf-tcp=443",
-                "--wf-udp=443",
-                "--lua-desync=" + str(lua_path),
+                "--wf-tcp-out=80,443",
+                "--wf-udp-out=443",
             ])
-            # Добавляем флаги стратегии напрямую
-            cmd.extend(flags)
         else:
-            # Linux: nfqws2 с netfilter queue
-            # Shadow-режим: используем отдельную nfqueue (номер 200)
-            cmd.extend([
-                "--qnum=200",
-                "--lua-desync=" + str(lua_path),
-            ])
-            cmd.extend(flags)
-
-            # Настроить iptables для shadow queue
+            # Linux: nfqws2 with netfilter queue
+            cmd.extend(["--qnum=200"])
             self._setup_linux_shadow_nfqueue()
+
+        # Load Lua libraries (required for zapret2)
+        if self._lua_dir:
+            lib_path = self._lua_dir / "zapret-lib.lua"
+            antidpi_path = self._lua_dir / "zapret-antidpi.lua"
+            if lib_path.exists():
+                cmd.append(f"--lua-init=@{lib_path}")
+            if antidpi_path.exists():
+                cmd.append(f"--lua-init=@{antidpi_path}")
+
+        # TLS filters
+        cmd.extend([
+            "--filter-tcp=80,443",
+            "--filter-l7=tls,http",
+            "--out-range=-d10",
+        ])
+
+        # Payload filters + strategy calls for TLS
+        cmd.append("--payload=tls_client_hello,http_req")
+
+        # Add strategy lua-desync calls
+        for call in flags:
+            cmd.append(f"--lua-desync={call}")
 
         logger.debug("Starting shadow zapret2: %s", " ".join(cmd))
 
         try:
+            # For Windows, set working dir to zapret binary dir (for WinDivert.dll)
+            cwd = str(self._zapret_dir) if self._is_windows and self._zapret_dir else None
+
             self._shadow_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                cwd=cwd,
                 creationflags=subprocess.CREATE_NO_WINDOW if self._is_windows else 0,
             )
+            logger.info("Shadow zapret2 started (pid=%d)", self._shadow_process.pid)
         except FileNotFoundError:
             logger.error("zapret2 binary not found at %s", self._zapret_bin)
             self._shadow_process = None
@@ -208,7 +219,7 @@ class ConnectionTester:
             self._shadow_process = None
 
     def _stop_shadow_zapret(self) -> None:
-        """Остановить shadow-экземпляр zapret2."""
+        """Stop shadow zapret2 instance."""
         if self._shadow_process is None:
             return
 
@@ -216,12 +227,10 @@ class ConnectionTester:
             proc = self._shadow_process
             self._shadow_process = None
 
-            # Мягкое завершение
             proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
-                # Принудительное завершение
                 proc.kill()
                 proc.wait(timeout=2)
 
@@ -235,14 +244,14 @@ class ConnectionTester:
     # ─── curl testing ──────────────────────────────────────────────────────
 
     def _curl_test(self, host: str) -> bool:
-        """Один curl-тест к хосту. Возвращает True если успешно."""
+        """Single curl test. Returns True if successful."""
         try:
             result = subprocess.run(
                 [
                     "curl", "-s",
                     "--max-time", str(self.timeout),
                     f"https://{host}",
-                    "-o", "/dev/null" if not self._is_windows else "NUL",
+                    "-o", "NUL" if self._is_windows else "/dev/null",
                     "-w", "%{http_code}",
                 ],
                 capture_output=True,
@@ -271,10 +280,8 @@ class ConnectionTester:
     # ─── Linux shadow nfqueue ──────────────────────────────────────────────
 
     def _setup_linux_shadow_nfqueue(self) -> None:
-        """Настроить отдельную nfqueue для shadow-тестирования."""
+        """Setup separate nfqueue for shadow testing."""
         try:
-            # Добавляем правила iptables для shadow queue 200
-            # Маркируем тестовый трафик через cgroup или mark
             subprocess.run(
                 ["iptables", "-t", "mangle", "-A", "OUTPUT",
                  "-p", "tcp", "--dport", "443",
@@ -287,7 +294,7 @@ class ConnectionTester:
             logger.warning("Failed to setup shadow nfqueue: %s", exc)
 
     def _cleanup_linux_shadow_nfqueue(self) -> None:
-        """Удалить правила shadow nfqueue."""
+        """Remove shadow nfqueue rules."""
         try:
             subprocess.run(
                 ["iptables", "-t", "mangle", "-D", "OUTPUT",
@@ -301,43 +308,59 @@ class ConnectionTester:
 
     # ─── Helpers ───────────────────────────────────────────────────────────
 
-    def _write_test_lua(self, flags: list[str]) -> Path:
-        """Записать временный Lua-файл со стратегией."""
-        flags_lua = "\n".join(f'        "{f}",' for f in flags)
-        content = _TEST_LUA_TEMPLATE.format(flags_lua=flags_lua)
-
-        tmp_dir = self._base_dir / "lua"
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        tmp_file = tmp_dir / f"_test_{id(flags):x}.lua"
-        tmp_file.write_text(content, encoding="utf-8")
-        return tmp_file
-
     def _resolve_zapret_binary(self) -> Optional[Path]:
-        """Найти бинарник zapret2."""
+        """Find zapret2 binary."""
         if self._is_windows:
             name = self.config.get("zapret_binary_windows", "winws2.exe")
         else:
             name = self.config.get("zapret_binary_linux", "nfqws2")
 
-        # Проверяем в PATH
+        # Check PATH
         found = shutil.which(name)
         if found:
             return Path(found)
 
-        # Проверяем рядом с проектом
+        # Check project root
         local = self._base_dir / name
         if local.exists():
             return local
 
-        # Проверяем стандартные пути
-        standard_paths = [
+        search_paths = [
+            self._base_dir / "bin" / name,
             Path("/usr/local/bin") / name,
             Path("/usr/bin") / name,
-            self._base_dir / "bin" / name,
         ]
-        for p in standard_paths:
+
+        # Search in zapret2 directory (windows x86_64 / x86)
+        if self._is_windows:
+            for zdir in sorted(self._base_dir.glob("zapret2-*/binaries/windows-x86_64"), reverse=True):
+                search_paths.insert(0, zdir / name)
+            for zdir in sorted(self._base_dir.glob("zapret2-*/binaries/windows-x86"), reverse=True):
+                search_paths.append(zdir / name)
+        else:
+            for zdir in sorted(self._base_dir.glob("zapret2-*/binaries/linux-*"), reverse=True):
+                search_paths.insert(0, zdir / "nfqws2")
+
+        for p in search_paths:
             if p.exists():
+                logger.info("Found zapret2 binary: %s", p)
                 return p
 
         logger.warning("zapret2 binary '%s' not found", name)
+        return None
+
+    def _resolve_lua_dir(self) -> Optional[Path]:
+        """Find zapret2 Lua library directory."""
+        # Search in zapret2 directory
+        for zdir in sorted(self._base_dir.glob("zapret2-*/lua"), reverse=True):
+            if (zdir / "zapret-lib.lua").exists():
+                logger.info("Found zapret2 Lua libs: %s", zdir)
+                return zdir
+
+        # Check project lua dir
+        local = self._base_dir / "lua"
+        if (local / "zapret-lib.lua").exists():
+            return local
+
+        logger.warning("zapret2 Lua libraries not found")
         return None

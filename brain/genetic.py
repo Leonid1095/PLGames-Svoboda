@@ -1,4 +1,12 @@
-"""StrategyGene — genetic algorithm for TCP optimization strategy evolution."""
+"""StrategyGene — genetic algorithm for zapret2 lua-desync strategy evolution.
+
+Strategies are built as zapret2 --lua-desync command-line arguments.
+Each strategy is a list of desync function calls, e.g.:
+  ["fake:blob=fake_default_tls:ip_ttl=6:tcp_md5", "multisplit:pos=midsld"]
+
+These get passed to winws2/nfqws2 as:
+  --lua-desync=fake:blob=fake_default_tls:ip_ttl=6:tcp_md5 --lua-desync=multisplit:pos=midsld
+"""
 
 from __future__ import annotations
 
@@ -9,39 +17,75 @@ from typing import Callable, Optional
 
 logger = logging.getLogger("svoboda.genetic")
 
-# ─── Gene pool: all valid optimization flags ───────────────────────────────────
+# ─── Gene pool: zapret2 lua-desync functions and parameters ───────────────────
 
-GENE_POOL: list[str] = [
-    "--dpi-desync=fake",
-    "--dpi-desync=rst",
-    "--dpi-desync=disorder",
-    "--dpi-desync=disorder2",
-    "--dpi-desync=multisplit",
-    "--dpi-desync=overlap",
+# Primary desync functions (at least one required per strategy)
+DESYNC_FUNCTIONS = [
+    "fake",
+    "fakedsplit",
+    "multisplit",
+    "multidisorder",
+    "disorder",
+    "syndata",
 ]
 
-GENE_POOL_PARAMS: list[tuple[str, int, int]] = [
-    ("--dpi-desync-ttl=", 1, 15),
-    ("--dpi-desync-split-pos=", 1, 5),
-    ("--dpi-desync-split-seqovl=", 1, 3),
-    ("--dpi-desync-repeats=", 2, 6),
+# Secondary functions (can be combined with primary)
+SECONDARY_FUNCTIONS = [
+    "pktmod",       # apply fooling to current dissect
+    "wssize",       # modify window size
+    "drop",         # drop original (used after send)
+    "send",         # send current dissect with modifiers
 ]
 
-GENE_POOL_BOOL: list[str] = [
-    "--dpi-desync-fooling=badseq",
-    "--dpi-desync-fooling=badsum",
-    "--dpi-desync-fooling=md5sig",
-    "--dpi-desync-ipfrag=1",
-    "--dpi-desync-fake-tls=1",
-]
+# Parameters for desync functions (key, possible values or range)
+DESYNC_PARAMS = {
+    # Fake parameters
+    "blob": ["fake_default_tls", "fake_default_http", "fake_default_quic", "0x00000000"],
+    "ip_ttl": (1, 15),
+    "ip6_ttl": (1, 15),
+    "ip_autottl": ["-1,3-20", "-2,3-20", "2,3-20"],
+    "ip6_autottl": ["-1,3-20", "-2,3-20", "2,3-20"],
+    "repeats": (1, 11),
 
-# Тип fitness-функции: принимает list[str] (флаги), возвращает float 0.0-1.0
+    # Split/disorder parameters
+    "pos": ["1", "2", "3", "5", "midsld", "method+2", "endhost-1",
+            "1,midsld", "midsld,endhost-1"],
+
+    # Sequence manipulation (fooling)
+    "tcp_seq": [-66000, -10000, -5000, 10000],
+    "tcp_ack": [-66000, -10000],
+
+    # TCP fooling flags (boolean-style)
+    "tcp_md5": None,       # no value needed
+    "tcp_ts_up": None,
+    "tcp_flags_unset": ["ack"],
+
+    # TLS modification
+    "tls_mod": ["rnd", "rndsni", "dupsid", "rnd,rndsni", "rnd,dupsid",
+                "rnd,rndsni,dupsid", "rnd,dupsid,sni=www.google.com"],
+
+    # IP fragmentation
+    "ipfrag": None,
+    "ipfrag_pos_udp": [8, 16, 24],
+
+    # Sequence overlap
+    "seqovl": (1, 10),
+    "seqovl_pattern": ["0x1603030000", "0x00000000"],
+
+    # Other
+    "nofake1": None,
+}
+
+# Boolean params (no value, just present or absent)
+BOOL_PARAMS = {"tcp_md5", "tcp_ts_up", "ipfrag", "nofake1"}
+
+# Fitness function type
 FitnessFunc = Callable[[list[str]], float]
 
 
 @dataclass
 class Individual:
-    """Одна особь — набор флагов zapret2."""
+    """One individual — a set of lua-desync function calls."""
 
     flags: list[str]
     fitness: float = 0.0
@@ -49,30 +93,30 @@ class Individual:
 
 @dataclass
 class GAConfig:
-    """Параметры генетического алгоритма."""
+    """Genetic algorithm parameters."""
 
     population_size: int = 12
     generations: int = 30
     mutation_rate: float = 0.3
     elite_size: int = 3
-    strategy_min_flags: int = 2
-    strategy_max_flags: int = 6
+    strategy_min_flags: int = 1  # min lua-desync calls
+    strategy_max_flags: int = 4  # max lua-desync calls
 
     @classmethod
     def from_config(cls, config: dict) -> GAConfig:
-        """Создать из общего config.json."""
+        """Create from config.json."""
         return cls(
             population_size=config.get("ga_population_size", 12),
             generations=config.get("ga_generations", 30),
             mutation_rate=config.get("ga_mutation_rate", 0.3),
             elite_size=config.get("ga_elite_size", 3),
-            strategy_min_flags=config.get("ga_strategy_min_flags", 2),
-            strategy_max_flags=config.get("ga_strategy_max_flags", 6),
+            strategy_min_flags=config.get("ga_strategy_min_flags", 1),
+            strategy_max_flags=config.get("ga_strategy_max_flags", 4),
         )
 
 
 class StrategyGene:
-    """Genetic algorithm for evolving TCP connection optimization strategies."""
+    """Genetic algorithm for evolving zapret2 lua-desync strategies."""
 
     def __init__(self, config: GAConfig, seed_strategies: Optional[list[list[str]]] = None):
         self.config = config
@@ -83,13 +127,13 @@ class StrategyGene:
         self._on_generation: Optional[Callable[[int, Individual], None]] = None
 
     def set_generation_callback(self, callback: Callable[[int, Individual], None]) -> None:
-        """Установить callback вызываемый после каждого поколения."""
+        """Set callback called after each generation."""
         self._on_generation = callback
 
-    # ─── Главный цикл эволюции ─────────────────────────────────────────────
+    # ─── Main evolution loop ─────────────────────────────────────────────
 
     def evolve(self, fitness_func: FitnessFunc) -> Individual:
-        """Запустить полный цикл эволюции, вернуть лучшую особь."""
+        """Run full evolution cycle, return best individual."""
         self._init_population()
         logger.info(
             "Starting evolution: pop=%d, gens=%d, mut_rate=%.2f",
@@ -101,88 +145,167 @@ class StrategyGene:
         for gen in range(self.config.generations):
             self.generation = gen
 
-            # Оценка fitness
+            # Evaluate fitness
             for ind in self.population:
                 if ind.fitness == 0.0:
                     ind.fitness = fitness_func(ind.flags)
 
-            # Сортировка по fitness (лучшие первые)
+            # Sort by fitness (best first)
             self.population.sort(key=lambda x: x.fitness, reverse=True)
 
             best = self.population[0]
             avg_fitness = sum(i.fitness for i in self.population) / len(self.population)
 
-            # Обновить лучшую за всё время
+            # Track all-time best
             if self.best_ever is None or best.fitness > self.best_ever.fitness:
                 self.best_ever = Individual(flags=list(best.flags), fitness=best.fitness)
 
             logger.info(
                 "Gen %02d: best=%.3f avg=%.3f flags=%s",
-                gen, best.fitness, avg_fitness, " ".join(best.flags),
+                gen, best.fitness, avg_fitness, " | ".join(best.flags),
             )
 
             if self._on_generation:
                 self._on_generation(gen, best)
 
-            # Ранний выход при идеальном fitness
+            # Early exit at perfect fitness
             if best.fitness >= 1.0:
                 logger.info("Perfect fitness reached at generation %d", gen)
                 break
 
-            # Создание нового поколения
+            # Create next generation
             self.population = self._next_generation()
 
         return self.best_ever  # type: ignore[return-value]
 
-    # ─── Инициализация популяции ───────────────────────────────────────────
+    # ─── Population initialization ───────────────────────────────────────
 
     def _init_population(self) -> None:
-        """Создать начальную популяцию."""
+        """Create initial population."""
         self.population = []
 
-        # Сначала добавляем seed-стратегии
+        # Seed strategies first
         for seed in self.seed_strategies[: self.config.population_size]:
             self.population.append(Individual(flags=list(seed)))
 
-        # Остальные — случайные
+        # Fill remaining with random strategies
         while len(self.population) < self.config.population_size:
             self.population.append(Individual(flags=self._random_strategy()))
 
     def _random_strategy(self) -> list[str]:
-        """Сгенерировать случайный набор флагов."""
-        num_flags = random.randint(self.config.strategy_min_flags, self.config.strategy_max_flags)
-        flags: list[str] = []
+        """Generate random zapret2 lua-desync strategy."""
+        num_calls = random.randint(self.config.strategy_min_flags, self.config.strategy_max_flags)
+        calls: list[str] = []
 
-        # Обязательно один основной desync-метод
-        flags.append(random.choice(GENE_POOL))
+        # First call must be a primary desync function
+        calls.append(self._random_desync_call())
 
-        # Набираем остальные
-        all_possible = self._all_possible_flags()
-        random.shuffle(all_possible)
-        for flag in all_possible:
-            if len(flags) >= num_flags:
-                break
-            if not self._conflicts(flags, flag):
-                flags.append(flag)
+        # Additional calls
+        for _ in range(num_calls - 1):
+            if random.random() < 0.6:
+                calls.append(self._random_desync_call())
+            else:
+                calls.append(self._random_secondary_call())
 
-        return flags
+        return calls
 
-    # ─── Генетические операторы ────────────────────────────────────────────
+    def _random_desync_call(self) -> str:
+        """Generate a random primary desync function call."""
+        func = random.choice(DESYNC_FUNCTIONS)
+        params = self._random_params_for(func)
+        if params:
+            return f"{func}:{':'.join(params)}"
+        return func
+
+    def _random_secondary_call(self) -> str:
+        """Generate a random secondary function call."""
+        func = random.choice(SECONDARY_FUNCTIONS)
+        params = self._random_params_for(func)
+        if params:
+            return f"{func}:{':'.join(params)}"
+        return func
+
+    def _random_params_for(self, func: str) -> list[str]:
+        """Generate random parameters appropriate for a function."""
+        params: list[str] = []
+
+        if func in ("fake", "fakedsplit"):
+            # fake needs blob
+            blob = random.choice(DESYNC_PARAMS["blob"])
+            params.append(f"blob={blob}")
+            # ttl
+            if random.random() < 0.7:
+                ttl = random.randint(*DESYNC_PARAMS["ip_ttl"])
+                params.append(f"ip_ttl={ttl}")
+                params.append(f"ip6_ttl={ttl}")
+            elif random.random() < 0.3:
+                autottl = random.choice(DESYNC_PARAMS["ip_autottl"])
+                params.append(f"ip_autottl={autottl}")
+                params.append(f"ip6_autottl={autottl}")
+            # fooling
+            if random.random() < 0.5:
+                params.append("tcp_md5")
+            if random.random() < 0.3:
+                seq = random.choice(DESYNC_PARAMS["tcp_seq"])
+                params.append(f"tcp_seq={seq}")
+            # repeats
+            if random.random() < 0.3:
+                reps = random.randint(*DESYNC_PARAMS["repeats"])
+                params.append(f"repeats={reps}")
+            # tls mod
+            if func == "fake" and random.random() < 0.4:
+                mod = random.choice(DESYNC_PARAMS["tls_mod"])
+                params.append(f"tls_mod={mod}")
+
+        elif func in ("multisplit", "multidisorder", "disorder"):
+            pos = random.choice(DESYNC_PARAMS["pos"])
+            params.append(f"pos={pos}")
+            if random.random() < 0.3:
+                seqovl = random.randint(*DESYNC_PARAMS["seqovl"])
+                params.append(f"seqovl={seqovl}")
+                if random.random() < 0.5:
+                    pat = random.choice(DESYNC_PARAMS["seqovl_pattern"])
+                    params.append(f"seqovl_pattern={pat}")
+
+        elif func == "pktmod":
+            if random.random() < 0.5:
+                ttl = random.randint(1, 3)
+                params.append(f"ip_ttl={ttl}")
+                params.append(f"ip6_ttl={ttl}")
+            if random.random() < 0.5:
+                params.append("tcp_md5")
+            if random.random() < 0.3:
+                seq = random.choice(DESYNC_PARAMS["tcp_seq"])
+                params.append(f"tcp_seq={seq}")
+
+        elif func == "wssize":
+            wsize = random.choice([1, 2, 4, 8, 16])
+            scale = random.choice([0, 2, 4, 6, 8])
+            params.append(f"wsize={wsize}")
+            params.append(f"scale={scale}")
+
+        elif func == "send":
+            if random.random() < 0.4:
+                params.append("ipfrag")
+
+        return params
+
+    # ─── Genetic operators ───────────────────────────────────────────────
 
     def _next_generation(self) -> list[Individual]:
-        """Создать следующее поколение."""
+        """Create next generation."""
         new_pop: list[Individual] = []
 
-        # 1. Элитизм — лучшие переходят без изменений
+        # 1. Elitism
         elites = self.population[: self.config.elite_size]
         for e in elites:
             new_pop.append(Individual(flags=list(e.flags), fitness=e.fitness))
 
-        # 2. Отбор родителей из топ-50%
+        # 2. Select parents from top 50%
         half = max(2, len(self.population) // 2)
         parents_pool = self.population[:half]
 
-        # 3. Скрещивание + мутация для заполнения популяции
+        # 3. Crossover + mutation
         while len(new_pop) < self.config.population_size:
             parent_a = random.choice(parents_pool)
             parent_b = random.choice(parents_pool)
@@ -194,118 +317,110 @@ class StrategyGene:
         return new_pop
 
     def _crossover(self, parent_a: list[str], parent_b: list[str]) -> list[str]:
-        """Двухточечный crossover."""
-        # Объединяем в один пул, берём уникальные
-        combined = list(parent_a) + [f for f in parent_b if f not in parent_a]
-        if len(combined) < 2:
-            return list(combined)
+        """Crossover: take some calls from each parent."""
+        if not parent_a or not parent_b:
+            return list(parent_a or parent_b)
 
-        # Двухточечный: выбираем 2 точки разреза
-        pt1 = random.randint(0, len(combined) - 1)
-        pt2 = random.randint(pt1, len(combined) - 1)
-
-        # Берём сегмент от parent_a и остаток от parent_b
         child: list[str] = []
-        for i, flag in enumerate(combined):
-            if pt1 <= i <= pt2:
-                # Из первого родителя (если есть)
-                if flag in parent_a:
-                    child.append(flag)
-            else:
-                # Из второго родителя (если есть)
-                if flag in parent_b:
-                    child.append(flag)
+        max_len = max(len(parent_a), len(parent_b))
 
-        # Гарантируем минимум
+        for i in range(max_len):
+            if random.random() < 0.5:
+                if i < len(parent_a):
+                    child.append(parent_a[i])
+            else:
+                if i < len(parent_b):
+                    child.append(parent_b[i])
+
         if not child:
-            child = list(parent_a[:2]) if len(parent_a) >= 2 else list(parent_a)
+            child = [random.choice(parent_a if parent_a else parent_b)]
 
         return child
 
     def _mutate(self, flags: list[str]) -> list[str]:
-        """Мутация: заменить/добавить/удалить случайный флаг."""
+        """Mutate: modify params, add/remove calls."""
         if random.random() > self.config.mutation_rate:
             return flags
 
         flags = list(flags)
-        action = random.choice(["replace", "add", "remove"])
+        action = random.choice(["mutate_params", "replace_call", "add_call", "remove_call"])
 
-        if action == "replace" and flags:
+        if action == "mutate_params" and flags:
+            # Mutate parameters of a random call
             idx = random.randint(0, len(flags) - 1)
-            new_flag = self._random_flag()
-            if not self._conflicts([f for i, f in enumerate(flags) if i != idx], new_flag):
-                flags[idx] = new_flag
+            flags[idx] = self._mutate_call(flags[idx])
 
-        elif action == "add" and len(flags) < self.config.strategy_max_flags:
-            new_flag = self._random_flag()
-            if not self._conflicts(flags, new_flag):
-                flags.append(new_flag)
+        elif action == "replace_call" and flags:
+            idx = random.randint(0, len(flags) - 1)
+            flags[idx] = self._random_desync_call()
 
-        elif action == "remove" and len(flags) > self.config.strategy_min_flags:
+        elif action == "add_call" and len(flags) < self.config.strategy_max_flags:
+            if random.random() < 0.6:
+                flags.append(self._random_desync_call())
+            else:
+                flags.append(self._random_secondary_call())
+
+        elif action == "remove_call" and len(flags) > self.config.strategy_min_flags:
             idx = random.randint(0, len(flags) - 1)
             flags.pop(idx)
 
         return flags
 
-    def _ensure_valid(self, flags: list[str]) -> list[str]:
-        """Гарантировать что стратегия валидна."""
-        # Должен быть хотя бы один основной desync-метод
-        has_desync = any(f.startswith("--dpi-desync=") for f in flags)
-        if not has_desync:
-            flags.insert(0, random.choice(GENE_POOL))
+    def _mutate_call(self, call: str) -> str:
+        """Mutate parameters within a single lua-desync call."""
+        parts = call.split(":")
+        func = parts[0]
+        params = parts[1:] if len(parts) > 1 else []
 
-        # Ограничить размер
+        mutation = random.choice(["change_param", "add_param", "remove_param"])
+
+        if mutation == "change_param" and params:
+            idx = random.randint(0, len(params) - 1)
+            param = params[idx]
+            if "=" in param:
+                key = param.split("=")[0]
+                if key == "ip_ttl" or key == "ip6_ttl":
+                    params[idx] = f"{key}={random.randint(1, 15)}"
+                elif key == "repeats":
+                    params[idx] = f"{key}={random.randint(1, 11)}"
+                elif key == "seqovl":
+                    params[idx] = f"{key}={random.randint(1, 10)}"
+                elif key == "pos":
+                    params[idx] = f"pos={random.choice(DESYNC_PARAMS['pos'])}"
+                elif key == "tcp_seq":
+                    params[idx] = f"tcp_seq={random.choice(DESYNC_PARAMS['tcp_seq'])}"
+
+        elif mutation == "add_param":
+            if random.random() < 0.5 and "tcp_md5" not in params:
+                params.append("tcp_md5")
+            elif random.random() < 0.5:
+                ttl = random.randint(1, 15)
+                # Replace existing ttl or add new
+                params = [p for p in params if not p.startswith("ip_ttl=")]
+                params.append(f"ip_ttl={ttl}")
+
+        elif mutation == "remove_param" and params:
+            idx = random.randint(0, len(params) - 1)
+            params.pop(idx)
+
+        if params:
+            return f"{func}:{':'.join(params)}"
+        return func
+
+    def _ensure_valid(self, flags: list[str]) -> list[str]:
+        """Ensure strategy is valid."""
+        if not flags:
+            flags = [self._random_desync_call()]
+
+        # Must have at least one primary desync function
+        has_primary = any(f.split(":")[0] in DESYNC_FUNCTIONS for f in flags)
+        if not has_primary:
+            flags.insert(0, self._random_desync_call())
+
+        # Limit size
         if len(flags) > self.config.strategy_max_flags:
             flags = flags[: self.config.strategy_max_flags]
         while len(flags) < self.config.strategy_min_flags:
-            new_flag = self._random_flag()
-            if not self._conflicts(flags, new_flag):
-                flags.append(new_flag)
+            flags.append(self._random_desync_call())
 
-        # Убрать дубликаты по префиксу
-        flags = self._deduplicate(flags)
         return flags
-
-    # ─── Вспомогательные ───────────────────────────────────────────────────
-
-    def _random_flag(self) -> str:
-        """Вернуть случайный допустимый флаг."""
-        kind = random.choice(["method", "param", "bool"])
-        if kind == "method":
-            return random.choice(GENE_POOL)
-        elif kind == "param":
-            prefix, lo, hi = random.choice(GENE_POOL_PARAMS)
-            return f"{prefix}{random.randint(lo, hi)}"
-        else:
-            return random.choice(GENE_POOL_BOOL)
-
-    def _all_possible_flags(self) -> list[str]:
-        """Все возможные флаги (с конкретными значениями параметров)."""
-        flags = list(GENE_POOL) + list(GENE_POOL_BOOL)
-        for prefix, lo, hi in GENE_POOL_PARAMS:
-            flags.append(f"{prefix}{random.randint(lo, hi)}")
-        return flags
-
-    @staticmethod
-    def _flag_prefix(flag: str) -> str:
-        """Извлечь префикс флага (до '=' или весь флаг)."""
-        if "=" in flag:
-            return flag.split("=")[0] + "="
-        return flag
-
-    def _conflicts(self, existing: list[str], new_flag: str) -> bool:
-        """Проверить конфликт нового флага с существующими."""
-        new_prefix = self._flag_prefix(new_flag)
-        # Нельзя два desync-метода одновременно
-        if new_prefix == "--dpi-desync=":
-            return any(f.startswith("--dpi-desync=") for f in existing)
-        # Нельзя дублировать одинаковые параметры
-        return any(self._flag_prefix(f) == new_prefix for f in existing)
-
-    def _deduplicate(self, flags: list[str]) -> list[str]:
-        """Убрать дубликаты по префиксу, оставив последний."""
-        seen: dict[str, str] = {}
-        for f in flags:
-            prefix = self._flag_prefix(f)
-            seen[prefix] = f
-        return list(seen.values())

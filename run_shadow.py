@@ -60,10 +60,12 @@ def run_one_cycle(
     print()
 
     seeds = [
-        ["--dpi-desync=disorder2", "--dpi-desync-ttl=5", "--dpi-desync-split-pos=3"],
-        ["--dpi-desync=fake", "--dpi-desync-ttl=6", "--dpi-desync-ipfrag=1"],
-        ["--dpi-desync=multisplit", "--dpi-desync-fooling=badseq", "--dpi-desync-ttl=4"],
-        ["--dpi-desync=disorder2", "--dpi-desync-ttl=3", "--dpi-desync-fooling=badseq"],
+        # zapret2 lua-desync strategies
+        ["fake:blob=fake_default_tls:ip_ttl=6:ip6_ttl=6:tcp_md5", "multisplit:pos=midsld"],
+        ["fake:blob=fake_default_tls:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5", "multidisorder:pos=1,midsld"],
+        ["fake:blob=fake_default_tls:ip_ttl=4:tcp_seq=-10000:repeats=6", "multidisorder:pos=midsld"],
+        ["fakedsplit:blob=fake_default_tls:ip_ttl=5:tcp_md5"],
+        ["fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,rndsni,dupsid", "multisplit:pos=midsld,endhost-1"],
     ]
 
     # Ask AI for extra seeds if available

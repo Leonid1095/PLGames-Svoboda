@@ -19,41 +19,53 @@ logger = logging.getLogger("svoboda.ai")
 
 _SYSTEM_PROMPT = """\
 You are an expert in zapret2/nfqws2 DPI desync bypass tool configuration.
-You MUST ONLY use the exact flags listed below. Do NOT invent new flags.
+zapret2 uses Lua-based strategies passed as --lua-desync= arguments.
 
-ALLOWED FLAGS (use ONLY these):
+AVAILABLE DESYNC FUNCTIONS:
+  fake        — send fake packet (needs blob= parameter)
+  fakedsplit  — fake + split combined
+  multisplit  — split TCP into multiple segments
+  multidisorder — split + reorder segments
+  disorder    — reorder TCP segments
+  syndata     — send data in SYN packet
+  pktmod      — modify current packet (fooling)
+  wssize      — modify TCP window size
+  send        — send current dissect with modifiers
+  drop        — drop original packet
 
-Methods (pick exactly ONE per strategy):
-  --dpi-desync=fake
-  --dpi-desync=rst
-  --dpi-desync=disorder
-  --dpi-desync=disorder2
-  --dpi-desync=multisplit
-  --dpi-desync=overlap
-
-Parameters (optional, combine with method):
-  --dpi-desync-ttl=N          (N = 1 to 15)
-  --dpi-desync-split-pos=N    (N = 1 to 5)
-  --dpi-desync-split-seqovl=N (N = 1 to 3)
-  --dpi-desync-repeats=N      (N = 2 to 6)
-
-Boolean flags (optional):
-  --dpi-desync-fooling=badseq
-  --dpi-desync-fooling=badsum
-  --dpi-desync-fooling=md5sig
-  --dpi-desync-ipfrag=1
-  --dpi-desync-fake-tls=1
+AVAILABLE PARAMETERS (colon-separated after function name):
+  blob=fake_default_tls|fake_default_http|fake_default_quic|0x00000000
+  ip_ttl=N              (N = 1 to 15)
+  ip6_ttl=N             (N = 1 to 15)
+  ip_autottl=DELTA,MIN-MAX  (e.g. -2,3-20)
+  ip6_autottl=DELTA,MIN-MAX
+  tcp_md5               (boolean, no value)
+  tcp_ts_up             (boolean)
+  tcp_seq=N             (e.g. -10000, -66000)
+  tcp_ack=N             (e.g. -66000)
+  tcp_flags_unset=ack
+  repeats=N             (N = 1 to 11)
+  pos=MARKER            (1, 2, 5, midsld, method+2, endhost-1)
+  seqovl=N              (N = 1 to 10)
+  seqovl_pattern=HEX    (e.g. 0x1603030000)
+  tls_mod=MODS          (rnd, rndsni, dupsid — comma-separated)
+  ipfrag                (boolean, enable IP fragmentation)
+  nofake1               (boolean)
+  wsize=N               (TCP window size)
+  scale=N               (TCP window scale)
 
 RULES:
-- Each strategy is an array of 2-6 flags from the list above
-- Each strategy MUST have exactly one --dpi-desync= method
+- Each strategy is an array of lua-desync call strings
+- Format: "function:param1:param2:param3"
+- Each strategy MUST have at least one primary desync function (fake, multisplit, etc.)
+- 1-4 calls per strategy
 - Return ONLY a valid JSON array of arrays, no text
 
 EXAMPLE OUTPUT:
 [
-  ["--dpi-desync=fake", "--dpi-desync-ttl=5", "--dpi-desync-split-pos=2"],
-  ["--dpi-desync=disorder2", "--dpi-desync-ttl=3", "--dpi-desync-fooling=badseq"],
-  ["--dpi-desync=multisplit", "--dpi-desync-ipfrag=1", "--dpi-desync-repeats=3"]
+  ["fake:blob=fake_default_tls:ip_ttl=6:tcp_md5", "multisplit:pos=midsld"],
+  ["fake:blob=fake_default_tls:ip_autottl=-2,3-20:tcp_md5:repeats=6", "multidisorder:pos=1,midsld"],
+  ["fakedsplit:blob=fake_default_tls:ip_ttl=4:tcp_seq=-10000", "pktmod:tcp_md5"]
 ]
 """
 

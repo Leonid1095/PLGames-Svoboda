@@ -29,5 +29,6 @@ bin/
 .ai_key
 .deepseek_key
 .install_id
+zapret2-*/
 .claude/
 svoboda.log*
