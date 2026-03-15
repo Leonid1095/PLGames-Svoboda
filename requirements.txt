@@ -1,0 +1,5 @@
+scapy>=2.5.0
+requests>=2.31
+python-telegram-bot>=21.0
+schedule>=1.2
+psutil>=5.9
