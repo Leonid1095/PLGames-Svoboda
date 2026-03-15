@@ -146,19 +146,20 @@ Return ONLY a JSON array of flag arrays using the allowed flags. No explanation,
                 strategies.append(s["flags"])
 
         # Expert strategies for Russian TSPU (proven patterns)
+        # Key: ip_autottl auto-detects correct TTL so fake reaches DPI but not server
         expert = [
+            # autottl fake + split (safest: TTL auto-calibrated)
+            ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=6", "multisplit:pos=midsld"],
             # multidisorder works well against TSPU sequence analysis
             ["multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000"],
-            # fake with low TTL — DPI sees fake, real server ignores it
-            ["fake:blob=fake_default_tls:ip_ttl=3:ip6_ttl=3:tcp_md5:repeats=8", "multisplit:pos=midsld"],
+            # autottl fake + multidisorder (for long connections like Discord)
+            ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5", "multidisorder:pos=1,midsld"],
             # multisplit at multiple positions
             ["multisplit:pos=1,midsld,endhost-1:seqovl=6:seqovl_pattern=0x1603030000"],
-            # multidisorder with seqovl — effective against reassembly-based DPI
-            ["multidisorder:pos=1:seqovl=3", "multidisorder:pos=midsld"],
-            # fake + multidisorder combo
-            ["fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5", "multidisorder:pos=midsld:seqovl=5"],
-            # aggressive: low TTL + high repeats + split
-            ["fake:blob=fake_default_tls:ip_ttl=2:ip6_ttl=2:tcp_md5:repeats=11", "multidisorder:pos=1,midsld"],
+            # fakedsplit with autottl
+            ["fakedsplit:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5"],
+            # aggressive: autottl + high repeats + split
+            ["fake:blob=fake_default_tls:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5:repeats=8", "multidisorder:pos=1,midsld"],
         ]
 
         strategies.extend(expert)

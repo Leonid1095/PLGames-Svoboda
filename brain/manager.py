@@ -4,12 +4,124 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("svoboda.manager")
+
+# ─── Valid zapret2 lua-desync functions ──────────────────────────────────────
+
+VALID_FUNCTIONS = {
+    "fake", "fakedsplit", "multisplit", "multidisorder", "syndata",
+    "pktmod", "wssize", "drop", "send",
+}
+
+# ─── Migration: old --dpi-desync format → new lua-desync format ──────────────
+
+_OLD_DESYNC_MAP = {
+    "fake": "fake:blob=fake_default_tls",
+    "disorder": "multidisorder",
+    "disorder2": "multidisorder",
+    "split": "multisplit",
+    "split2": "multisplit",
+    "overlap": "multisplit",
+}
+
+
+def _migrate_old_flag(flag: str) -> Optional[str]:
+    """Convert old --dpi-desync=X format to new lua-desync format.
+
+    Returns None if flag is invalid/unrecoverable.
+    """
+    # Already new format (no -- prefix)
+    if not flag.startswith("--"):
+        return flag
+
+    # Parse --key=value
+    if "=" not in flag:
+        return None
+    key, value = flag.split("=", 1)
+    key = key.lstrip("-")
+
+    if key == "dpi-desync":
+        return _OLD_DESYNC_MAP.get(value, value)
+    if key == "dpi-desync-ttl":
+        return f"ip_ttl={value}"
+    if key == "dpi-desync-fooling":
+        parts = []
+        if "badseq" in value:
+            parts.append("tcp_seq=-10000")
+        if "md5sig" in value:
+            parts.append("tcp_md5")
+        if "badsum" in value:
+            parts.append("tcp_md5")  # closest equivalent
+        return ":".join(parts) if parts else None
+    if key == "dpi-desync-split-pos":
+        return f"pos={value}"
+    if key == "dpi-desync-repeats":
+        return f"repeats={value}"
+
+    return None
+
+
+def _migrate_strategy_flags(flags: list[str]) -> list[str]:
+    """Migrate a full strategy from old to new format."""
+    if not flags:
+        return flags
+
+    # Check if any flag uses old format
+    has_old = any(f.startswith("--") for f in flags)
+    if not has_old:
+        return flags
+
+    # Group old flags into one lua-desync call
+    base_func = None
+    params: list[str] = []
+    new_flags: list[str] = []
+
+    for flag in flags:
+        if not flag.startswith("--"):
+            new_flags.append(flag)
+            continue
+
+        migrated = _migrate_old_flag(flag)
+        if migrated is None:
+            continue
+
+        # Check if it's a function name or parameter
+        func_name = migrated.split(":")[0]
+        if func_name in VALID_FUNCTIONS or func_name in _OLD_DESYNC_MAP.values():
+            if base_func:
+                # Save previous function
+                call = base_func + (":" + ":".join(params) if params else "")
+                new_flags.append(call)
+                params = []
+            base_func = migrated
+        else:
+            params.append(migrated)
+
+    # Flush last function
+    if base_func:
+        call = base_func + (":" + ":".join(params) if params else "")
+        new_flags.append(call)
+
+    return new_flags if new_flags else flags
+
+
+def validate_flags(flags: list[str]) -> bool:
+    """Check if flags are valid zapret2 lua-desync format."""
+    if not flags:
+        return False
+    for flag in flags:
+        if flag.startswith("--"):
+            return False  # old format
+        func = flag.split(":")[0]
+        if func not in VALID_FUNCTIONS:
+            return False
+    return True
 
 # ─── Lua template for strategy generation ──────────────────────────────────────
 
@@ -168,15 +280,30 @@ class StrategyManager:
     # ─── Внутренние методы ─────────────────────────────────────────────────
 
     def _load_db(self) -> None:
-        """Загрузить базу стратегий с диска."""
+        """Загрузить базу стратегий с диска, мигрировать старый формат."""
         if not self.db_path.exists():
             self.strategies = []
             logger.info("No strategies DB found at %s, starting fresh", self.db_path)
             return
         try:
             raw = json.loads(self.db_path.read_text(encoding="utf-8"))
-            self.strategies = [StrategyRecord.from_dict(r) for r in raw]
-            logger.info("Loaded %d strategies from %s", len(self.strategies), self.db_path)
+            migrated_count = 0
+            valid = []
+            for r in raw:
+                record = StrategyRecord.from_dict(r)
+                # Migrate old --dpi-desync format
+                new_flags = _migrate_strategy_flags(record.flags)
+                if new_flags != record.flags:
+                    record.flags = new_flags
+                    migrated_count += 1
+                # Only keep valid strategies
+                if validate_flags(record.flags):
+                    valid.append(record)
+            self.strategies = valid
+            if migrated_count:
+                logger.info("Migrated %d strategies from old format", migrated_count)
+                self._save_db()
+            logger.info("Loaded %d valid strategies from %s", len(self.strategies), self.db_path)
         except (json.JSONDecodeError, KeyError) as exc:
             logger.error("Failed to load strategies DB: %s", exc)
             self.strategies = []

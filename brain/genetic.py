@@ -124,6 +124,9 @@ class StrategyGene:
         self.generation: int = 0
         self.best_ever: Optional[Individual] = None
         self._on_generation: Optional[Callable[[int, Individual], None]] = None
+        self._stagnation_count: int = 0
+        self._last_best_fitness: float = 0.0
+        self._base_mutation_rate: float = config.mutation_rate
 
     def set_generation_callback(self, callback: Callable[[int, Individual], None]) -> None:
         """Set callback called after each generation."""
@@ -171,6 +174,19 @@ class StrategyGene:
             if best.fitness >= 1.0:
                 logger.info("Perfect fitness reached at generation %d", gen)
                 break
+
+            # Stagnation detection: if best unchanged for 5 gens, shake things up
+            if abs(best.fitness - self._last_best_fitness) < 0.01:
+                self._stagnation_count += 1
+            else:
+                self._stagnation_count = 0
+                self.config.mutation_rate = self._base_mutation_rate
+            self._last_best_fitness = best.fitness
+
+            if self._stagnation_count >= 5:
+                self.config.mutation_rate = min(0.7, self._base_mutation_rate * 2)
+                logger.info("Stagnation detected, boosting mutation to %.2f", self.config.mutation_rate)
+                self._stagnation_count = 0
 
             # Create next generation
             self.population = self._next_generation()
@@ -232,15 +248,15 @@ class StrategyGene:
             # fake needs blob
             blob = random.choice(DESYNC_PARAMS["blob"])
             params.append(f"blob={blob}")
-            # ttl
+            # ttl: prefer autottl (70%) — safer and auto-calibrates
             if random.random() < 0.7:
-                ttl = random.randint(*DESYNC_PARAMS["ip_ttl"])
-                params.append(f"ip_ttl={ttl}")
-                params.append(f"ip6_ttl={ttl}")
-            elif random.random() < 0.3:
                 autottl = random.choice(DESYNC_PARAMS["ip_autottl"])
                 params.append(f"ip_autottl={autottl}")
                 params.append(f"ip6_autottl={autottl}")
+            else:
+                ttl = random.randint(3, DESYNC_PARAMS["ip_ttl"][1])  # floor at 3
+                params.append(f"ip_ttl={ttl}")
+                params.append(f"ip6_ttl={ttl}")
             # fooling
             if random.random() < 0.5:
                 params.append("tcp_md5")

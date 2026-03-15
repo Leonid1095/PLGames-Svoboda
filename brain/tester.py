@@ -104,10 +104,12 @@ _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
 class ConnectionTester:
     """Connection quality tester for zapret2 lua-desync strategies."""
 
-    def __init__(self, config: dict, mock: bool = True):
+    def __init__(self, config: dict, mock: bool = True, hostlist_path: Optional[Path] = None):
         self.config = config
         self.mock = mock
-        self.hosts: list[str] = config.get("test_hosts", ["youtube.com", "discord.com", "x.com"])
+        self.hosts: list[str] = config.get("test_hosts", ["youtube.com", "discord.com", "cdn.discordapp.com"])
+        self.hosts_h2: list[str] = config.get("test_hosts_h2", ["youtube.com"])
+        self.hosts_ws: list[str] = config.get("test_hosts_websocket", ["gateway.discord.gg"])
         self.trials: int = config.get("test_trials", 3)
         self.timeout: int = config.get("test_timeout", 5)
         self._evo_timeout: int = min(self.timeout, 3)  # shorter timeout during evolution
@@ -117,6 +119,7 @@ class ConnectionTester:
         self._zapret_bin = self._resolve_zapret_binary()
         self._zapret_dir = self._zapret_bin.parent if self._zapret_bin else None
         self._lua_dir = self._resolve_lua_dir()
+        self._hostlist_path = hostlist_path
         self._shadow_process: Optional[subprocess.Popen] = None
         self._last_report: Optional[StrategyTestReport] = None
 
@@ -201,6 +204,22 @@ class ConnectionTester:
 
                 if consecutive_fails >= 2 and successful == 0:
                     break
+
+            # 3b. Extended tests: H2 stream + WebSocket (only if basic tests passed)
+            if successful > 0:
+                for host in self.hosts_h2:
+                    r = self._curl_test_h2_stream(host, timeout_override=timeout + 2)
+                    all_results.append(r)
+                    total_tests += 1
+                    if r.success:
+                        successful += 1
+
+                for host in self.hosts_ws:
+                    r = self._curl_test_websocket(host, timeout_override=timeout)
+                    all_results.append(r)
+                    total_tests += 1
+                    if r.success:
+                        successful += 1
 
         except Exception as exc:
             logger.error("Test failed: %s", exc)
@@ -335,6 +354,7 @@ class ConnectionTester:
             cmd.extend([
                 "--wf-tcp-out=80,443",
                 "--wf-udp-out=443",
+                "--wf-tcp-in=80,443",    # capture incoming for autottl
             ])
         else:
             # Linux: nfqws2 with netfilter queue
@@ -355,15 +375,24 @@ class ConnectionTester:
                 rel = os.path.relpath(str(antidpi_path), base)
                 cmd.append(f"--lua-init=@{rel}")
 
+        # Hostlist: only apply desync to blocked domains (prevents breaking all traffic)
+        if self._hostlist_path and self._hostlist_path.exists() and self._zapret_dir:
+            import shutil
+            local_hl = self._zapret_dir / "hostlist.txt"
+            try:
+                shutil.copy2(str(self._hostlist_path), str(local_hl))
+                cmd.append("--hostlist=hostlist.txt")
+            except Exception:
+                pass
+
         # TLS filters
         cmd.extend([
             "--filter-tcp=80,443",
             "--filter-l7=tls,http",
-            "--out-range=-d10",
+            "--out-range=-s34228",       # first ~32KB outgoing
+            "--in-range=-s5556",         # first ~5KB incoming (for autottl)
+            "--payload=tls_client_hello,http_req",
         ])
-
-        # Payload filters + strategy calls for TLS
-        cmd.append("--payload=tls_client_hello,http_req")
 
         # Add strategy lua-desync calls
         for call in flags:
@@ -512,6 +541,71 @@ class ConnectionTester:
         if returncode in cls._CURL_SSL_CODES:
             return "ssl"
         return "error"
+
+    # ─── Extended tests: HTTP/2 stream + WebSocket ──────────────────────────
+
+    def _curl_test_h2_stream(self, host: str, timeout_override: int = 0) -> HostTestResult:
+        """Test HTTP/2 stream — download 64KB to detect strategies that break after handshake."""
+        timeout = timeout_override or 8
+        try:
+            result = subprocess.run(
+                [
+                    "curl", "-s", "--http2",
+                    "--max-time", str(timeout),
+                    "-r", "0-65535",
+                    f"https://{host}",
+                    "-o", "NUL" if self._is_windows else "/dev/null",
+                    "-w", "%{http_code}|%{time_total}",
+                ],
+                capture_output=True, text=True, timeout=timeout + 3,
+            )
+            parts = result.stdout.strip().split("|")
+            http_code = int(parts[0]) if parts else 0
+            latency_ms = round(float(parts[1]) * 1000, 1) if len(parts) > 1 else 0.0
+
+            if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
+                return HostTestResult(host=f"h2:{host}", success=True, http_code=http_code, latency_ms=latency_ms)
+
+            error_type = self._classify_curl_error(result.returncode)
+            return HostTestResult(host=f"h2:{host}", success=False, http_code=http_code, latency_ms=latency_ms, error_type=error_type)
+        except subprocess.TimeoutExpired:
+            return HostTestResult(host=f"h2:{host}", success=False, latency_ms=timeout * 1000, error_type="timeout")
+        except Exception:
+            return HostTestResult(host=f"h2:{host}", success=False, error_type="error")
+
+    def _curl_test_websocket(self, host: str, timeout_override: int = 0) -> HostTestResult:
+        """Test WebSocket upgrade — verifies Discord gateway-style connections."""
+        timeout = timeout_override or 5
+        try:
+            result = subprocess.run(
+                [
+                    "curl", "-s",
+                    "--max-time", str(timeout),
+                    f"https://{host}",
+                    "-H", "Upgrade: websocket",
+                    "-H", "Connection: Upgrade",
+                    "-H", "Sec-WebSocket-Version: 13",
+                    "-H", "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+                    "-o", "NUL" if self._is_windows else "/dev/null",
+                    "-w", "%{http_code}|%{time_total}",
+                ],
+                capture_output=True, text=True, timeout=timeout + 3,
+            )
+            parts = result.stdout.strip().split("|")
+            http_code = int(parts[0]) if parts else 0
+            latency_ms = round(float(parts[1]) * 1000, 1) if len(parts) > 1 else 0.0
+
+            # WebSocket upgrade: 101 Switching Protocols, or 404 (gateway responds)
+            ws_success = http_code in {101, 200, 301, 302, 404} and result.returncode in {0, 28}
+            if ws_success:
+                return HostTestResult(host=f"ws:{host}", success=True, http_code=http_code, latency_ms=latency_ms)
+
+            error_type = self._classify_curl_error(result.returncode)
+            return HostTestResult(host=f"ws:{host}", success=False, http_code=http_code, latency_ms=latency_ms, error_type=error_type)
+        except subprocess.TimeoutExpired:
+            return HostTestResult(host=f"ws:{host}", success=False, latency_ms=timeout * 1000, error_type="timeout")
+        except Exception:
+            return HostTestResult(host=f"ws:{host}", success=False, error_type="error")
 
     # ─── Linux shadow nfqueue ──────────────────────────────────────────────
 

@@ -214,7 +214,12 @@ def _start_permanent_zapret(
     cwd = str(binary.parent) if is_win else None
 
     if is_win:
-        cmd.extend(["--wf-tcp-out=80,443", "--wf-udp-out=443"])
+        cmd.extend([
+            "--wf-tcp-out=80,443",
+            "--wf-udp-out=443",
+            "--wf-tcp-in=80,443",    # capture incoming for autottl calibration
+            "--wf-tcp-empty=1",      # count ALL packets (needed for accurate counters)
+        ])
     else:
         cmd.extend(["--qnum=200"])
 
@@ -228,37 +233,58 @@ def _start_permanent_zapret(
         if antidpi.exists():
             cmd.append(f"--lua-init=@{os.path.relpath(str(antidpi), base)}")
 
-    # Hostlist: only apply desync to known blocked domains
+    # Hostlist: copy to binary dir to avoid path issues, then use relative
     if hostlist and hostlist.exists():
-        cmd.append(f"--hostlist={os.path.relpath(str(hostlist), cwd or '.')}")
+        import shutil
+        bin_dir = binary.parent
+        local_hostlist = bin_dir / "hostlist.txt"
+        local_auto = bin_dir / "hostlist-auto.txt"
+        try:
+            shutil.copy2(str(hostlist), str(local_hostlist))
+            if not local_auto.exists():
+                local_auto.write_text("", encoding="utf-8")
+            cmd.append("--hostlist=hostlist.txt")
+            cmd.append("--hostlist-auto=hostlist-auto.txt")
+            cmd.append("--hostlist-auto-fail-threshold=3")
+            cmd.append("--hostlist-auto-fail-time=60")
+        except Exception as exc:
+            print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
-    # Auto-hostlist: detect NEW blocked domains automatically
-    auto_path = hostlist.parent / "hostlist-auto.txt" if hostlist else None
-    if auto_path and auto_path.exists():
-        cmd.append(f"--hostlist-auto={os.path.relpath(str(auto_path), cwd or '.')}")
-        cmd.append("--hostlist-auto-fail-threshold=3")
-        cmd.append("--hostlist-auto-fail-time=60")
-
-    # Filters
+    # ── Profile 1: TLS (HTTPS) ──────────────────────────────────
     cmd.extend([
-        "--filter-tcp=80,443", "--filter-l7=tls,http",
-        "--out-range=-d10",
-        "--payload=tls_client_hello,http_req",
+        "--filter-tcp=443", "--filter-l7=tls",
+        "--out-range=-s34228",       # process first ~32KB of outgoing data
+        "--in-range=-s5556",         # capture first ~5KB incoming (for autottl)
+        "--payload=tls_client_hello",
     ])
-
-    # Strategy lua-desync calls
+    # Strategy 1: fake with badsum (DPI sees fake, server drops it)
+    cmd.append("--lua-desync=fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=6")
+    # Strategy 2: user-evolved strategy as fallback
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # QUIC support (basic fake)
+    # ── Profile 2: HTTP (port 80) ────────────────────────────────
+    cmd.extend([
+        "--new",
+        "--filter-tcp=80", "--filter-l7=http",
+        "--out-range=-s34228",
+        "--payload=http_req",
+    ])
+    cmd.append("--lua-desync=fake:blob=fake_default_http:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5")
+    for call in flags:
+        cmd.append(f"--lua-desync={call}")
+
+    # ── Profile 3: QUIC (UDP/443) ────────────────────────────────
     cmd.extend([
         "--new",
         "--filter-udp=443", "--filter-l7=quic",
         "--payload=quic_initial",
-        "--lua-desync=fake:blob=fake_default_quic:repeats=4",
+        "--lua-desync=fake:blob=fake_default_quic:repeats=6",
     ])
 
-    cwd = str(binary.parent) if is_win else None
+    log = logging.getLogger("svoboda")
+    log.info("Permanent winws2 cmd: %s", " ".join(cmd))
+    log.info("Permanent winws2 cwd: %s", cwd)
 
     try:
         proc = subprocess.Popen(
@@ -268,14 +294,17 @@ def _start_permanent_zapret(
             cwd=cwd,
             creationflags=subprocess.CREATE_NO_WINDOW if is_win else 0,
         )
-        time.sleep(1)
+        time.sleep(2)
         if proc.poll() is not None:
             stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-            print(f"  [ERROR] winws2 exited immediately: {stderr[:200]}")
+            print(f"  [ERROR] winws2 exited immediately: {stderr[:300]}")
+            log.error("Permanent winws2 crashed: %s", stderr[:500])
             return None
+        log.info("Permanent winws2 started (pid=%d)", proc.pid)
         return proc
     except Exception as exc:
         print(f"  [ERROR] Failed to start winws2: {exc}")
+        log.error("Permanent winws2 launch error: %s", exc)
         return None
 
 
@@ -456,20 +485,200 @@ def main():
         return
 
     blocked_hosts = [h for h, ok in baseline.items() if not ok]
-    print(f"\n  {len(blocked_hosts)} site(s) blocked. Starting DPI bypass evolution...")
+    print(f"\n  {len(blocked_hosts)} site(s) blocked.")
 
-    # ─── Build seed strategies ────────────────────────────────────────
-    seeds = _get_seeds(isp_name, ai)
+    # ─── Quick start: try last known working strategy first ──────────
+    tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
+    cached_best = manager.get_best_strategy(isp_name)
+    if cached_best and cached_best.fitness > 0.3:
+        print(f"\n  Trying cached strategy (fitness={cached_best.fitness:.3f})...")
+        verified = tester.test_strategy_thorough(cached_best.flags)
+        if verified > 0.5:
+            print(f"  [OK] Cached strategy works! (fitness={verified:.3f})")
+            # Skip evolution — apply immediately
+            best_flags = cached_best.flags
+            best_fitness = verified
+            # Jump to apply
+            record = manager.save_strategy(best_flags, best_fitness, isp_name)
+            analytics.log_strategy(
+                strategy_id=record.id, flags=best_flags, fitness=best_fitness,
+                isp=isp_name, source="cached",
+            )
 
-    # ─── Real Evolution ──────────────────────────────────────────────
-    tester = ConnectionTester(config, mock=False)
-    ga_config = GAConfig.from_config(config)
-    # Limit generations/population for real testing (each = winws2 start/stop)
-    ga_config.generations = min(ga_config.generations, 15)
-    ga_config.population_size = min(ga_config.population_size, 10)
-    fitness_threshold = config.get("fitness_apply_threshold", 0.7)
+            print(f"\n  Applying cached strategy (fitness={best_fitness:.3f})...")
+            print(f"  Strategy: {' | '.join(best_flags)}")
+            _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist)
 
-    best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
+            if _active_process:
+                time.sleep(2)
+                verify = _quick_connectivity_check(hosts)
+                working = sum(1 for ok in verify.values() if ok)
+                total = len(verify)
+                print()
+                for host, ok in verify.items():
+                    print(f"    {host}: {'OK' if ok else 'FAIL'}")
+                if working > 0:
+                    print(f"\n  === DPI BYPASS ACTIVE ({working}/{total} sites) ===")
+                    print(f"\n  Tier:     {tier.get_status_line()}")
+                    print(f"  Donate:   {donate.page_url}")
+                    print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
+
+                    # Go to watchdog
+                    watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
+                    fail_threshold = config.get("watchdog_fail_threshold", 2)
+                    min_fitness = config.get("watchdog_min_fitness", 0.6)
+                    active_strategy_id = record.id
+                    ga_config = GAConfig.from_config(config)
+                    ga_config.generations = min(ga_config.generations, 15)
+                    ga_config.population_size = min(ga_config.population_size, 10)
+
+                    while _running:
+                        for _ in range(watchdog_interval):
+                            if not _running:
+                                break
+                            time.sleep(1)
+                        if not _running:
+                            break
+
+                        now = datetime.now().strftime("%H:%M")
+                        status_parts = []
+                        for host in hosts:
+                            r = _curl_check_one(host, timeout=5)
+                            analytics.log_test_result(
+                                strategy_id=active_strategy_id,
+                                host=host, http_code=r["http_code"],
+                                success=r["success"], latency_ms=r["latency_ms"],
+                                error_type=r["error_type"],
+                            )
+                            short = host.replace(".com", "").replace(".discordapp", "")
+                            if r["success"]:
+                                status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
+                            else:
+                                err = r["error_type"] or "FAIL"
+                                status_parts.append(f"{short}:{err.upper()}")
+
+                        health = analytics.get_all_hosts_health(hosts, minutes=10)
+                        print(f"  [{now}] {' | '.join(status_parts)}  (health={health['overall_rate']:.0%})")
+
+                        if health["overall_rate"] < min_fitness:
+                            print(f"\n  [!] Health degraded, re-evolving...")
+                            _stop_permanent_zapret(_active_process)
+                            _active_process = None
+                            break  # Fall through to evolution
+
+                    if _running and _active_process:
+                        # Clean exit from watchdog
+                        _stop_permanent_zapret(_active_process)
+                        analytics.close()
+                        return
+                else:
+                    print("\n  [!] Cached strategy failed verification, evolving...")
+                    _stop_permanent_zapret(_active_process)
+                    _active_process = None
+        else:
+            print(f"  [!] Cached strategy outdated (fitness={verified:.3f}), evolving...")
+
+    # ─── Fast enumeration (blockcheck2-style) ──────────────────────
+    from brain.enumerator import StrategyEnumerator
+
+    print(f"\n  Fast strategy enumeration (testing known strategies)...")
+    enumerator = StrategyEnumerator()
+
+    def _enum_progress(i, total, name, fitness):
+        status = "OK" if fitness >= 0.6 else "fail"
+        print(f"    [{i}/{total}] {name}: {fitness:.3f} ({status})")
+
+    enum_result = enumerator.enumerate(
+        tester, threshold=0.6, on_progress=_enum_progress,
+    )
+
+    if enum_result:
+        # Found a working strategy via enumeration!
+        best_flags = enum_result["flags"]
+        best_fitness = enum_result["fitness"]
+        print(f"\n  [OK] Found: {enum_result['name']} (fitness={best_fitness:.3f})")
+        print(f"       {enum_result.get('desc', '')}")
+
+        # Save and apply
+        record = manager.save_strategy(best_flags, best_fitness, isp_name)
+        analytics.log_strategy(
+            strategy_id=record.id, flags=best_flags, fitness=best_fitness,
+            isp=isp_name, source="enumeration",
+        )
+
+        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist)
+        if _active_process:
+            time.sleep(2)
+            verify = _quick_connectivity_check(hosts)
+            working = sum(1 for ok in verify.values() if ok)
+            total_h = len(verify)
+            print()
+            for host, ok in verify.items():
+                print(f"    {host}: {'OK' if ok else 'FAIL'}")
+
+            if working > 0:
+                print(f"\n  === DPI BYPASS ACTIVE ({working}/{total_h} sites) ===")
+                print(f"\n  Strategy: {' | '.join(best_flags)}")
+                print(f"  Tier:     {tier.get_status_line()}")
+                print(f"  Donate:   {donate.page_url}")
+                print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
+
+                # Watchdog for enumerated strategy
+                watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
+                active_strategy_id = record.id
+                while _running:
+                    for _ in range(watchdog_interval):
+                        if not _running:
+                            break
+                        time.sleep(1)
+                    if not _running:
+                        break
+                    now = datetime.now().strftime("%H:%M")
+                    status_parts = []
+                    for host in hosts:
+                        r = _curl_check_one(host, timeout=5)
+                        analytics.log_test_result(
+                            strategy_id=active_strategy_id,
+                            host=host, http_code=r["http_code"],
+                            success=r["success"], latency_ms=r["latency_ms"],
+                            error_type=r["error_type"],
+                        )
+                        short = host.replace(".com", "").replace(".discordapp", "")
+                        if r["success"]:
+                            status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
+                        else:
+                            status_parts.append(f"{short}:{(r['error_type'] or 'FAIL').upper()}")
+                    health = analytics.get_all_hosts_health(hosts, minutes=10)
+                    print(f"  [{now}] {' | '.join(status_parts)}  (health={health['overall_rate']:.0%})")
+                    if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
+                        print(f"\n  [!] Health degraded, re-evolving...")
+                        _stop_permanent_zapret(_active_process)
+                        _active_process = None
+                        break
+                # Clean exit or degraded — either way we're done
+                if _running and _active_process:
+                    _stop_permanent_zapret(_active_process)
+                analytics.close()
+                return
+            else:
+                print("\n  [!] Strategy works in test but not in permanent, trying evolution...")
+                _stop_permanent_zapret(_active_process)
+                _active_process = None
+                enum_result = None  # fall through to GA
+
+    if not enum_result:
+        print(f"\n  Starting GA evolution (this may take a few minutes)...")
+
+        # ─── Build seed strategies ────────────────────────────────────────
+        seeds = _get_seeds(isp_name, ai)
+
+        # ─── Real Evolution ──────────────────────────────────────────────
+        ga_config = GAConfig.from_config(config)
+        ga_config.generations = min(ga_config.generations, 15)
+        ga_config.population_size = min(ga_config.population_size, 10)
+        fitness_threshold = config.get("fitness_apply_threshold", 0.7)
+
+        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
 
     if not best or best.fitness < 0.1:
         print()
@@ -649,7 +858,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
     print("  Monitoring for DPI blocking... (Ctrl+C to stop)")
     print()
 
-    tester = ConnectionTester(config, mock=False)
+    tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
     ga_config = GAConfig.from_config(config)
 
     while _running:
@@ -711,18 +920,17 @@ def _get_seeds(isp_name: str, ai: AIAdvisor) -> list[list[str]]:
     not just split/disorder which only helps initial handshake.
     """
     seeds = [
-        # Proven TSPU combos: fake with low TTL + split (handles both handshake AND stream)
-        ["fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5:repeats=6", "multidisorder:pos=1,midsld"],
-        ["fake:blob=fake_default_tls:ip_ttl=6:ip6_ttl=6:tcp_md5", "multisplit:pos=midsld"],
-        ["fake:blob=fake_default_tls:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5", "multidisorder:pos=1,midsld"],
-        # Higher repeats + autottl (for aggressive TSPU)
+        # autottl fake — auto-calibrates TTL to reach DPI but not server
+        ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=6", "multisplit:pos=midsld"],
+        ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5", "multidisorder:pos=1,midsld"],
+        # Known winner: multisplit + multidisorder
+        ["multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000", "multidisorder:pos=1,midsld"],
+        # autottl + high repeats (aggressive TSPU)
         ["fake:blob=fake_default_tls:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5:repeats=8", "multisplit:pos=1,midsld"],
-        # fakedsplit — single call, simpler but sometimes enough
-        ["fakedsplit:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5"],
-        # Combined with your best winner + fake for streaming
-        ["fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5:repeats=4", "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000", "multidisorder:pos=1,midsld"],
-        # Aggressive combo: fake + split + disorder
-        ["fake:blob=fake_default_tls:ip_ttl=3:ip6_ttl=3:tcp_md5:repeats=10", "multisplit:pos=1,midsld"],
+        # fakedsplit with autottl
+        ["fakedsplit:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5"],
+        # Combined winner + fake
+        ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=4", "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000"],
     ]
 
     # ISP-specific seeds
