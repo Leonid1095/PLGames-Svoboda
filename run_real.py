@@ -499,8 +499,30 @@ def main():
             if s not in classifier_strategies:
                 classifier_strategies.append(s)
 
-    # ─── Quick start: try last known working strategy first ──────────
+    # ─── Quick start: try community → cache → enum → GA ────────────
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
+    dpi_type = tspu_profile.dpi_type if tspu_profile else "unknown"
+
+    # Step 1: Community instant strategy
+    if sync.is_configured:
+        community = sync.get_instant_strategy(isp_name, dpi_type)
+        if community and community.get("flags"):
+            print(f"\n  Trying community strategy (fitness={community['fitness']:.3f}, {community['report_count']} users)...")
+            verified = tester.test_strategy(community["flags"])
+            if verified > 0.5:
+                print(f"  [OK] Community strategy works! (fitness={verified:.3f})")
+                sync.vote_strategy(community["flags"], success=True, fitness=verified, isp=isp_name, dpi_type=dpi_type)
+                # Apply directly — skip everything
+                record = manager.save_strategy(community["flags"], verified, isp_name)
+                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist)
+                if _active_process:
+                    print(f"\n  === DPI BYPASS ACTIVE (community strategy) ===\n")
+                    # TODO: go to watchdog
+            else:
+                print(f"  [!] Community strategy failed (fitness={verified:.3f})")
+                sync.vote_strategy(community["flags"], success=False, fitness=verified, isp=isp_name, dpi_type=dpi_type)
+
+    # Step 2: Local cache
     cached_best = manager.get_best_strategy(isp_name)
     if cached_best and cached_best.fitness > 0.3:
         print(f"\n  Trying cached strategy (fitness={cached_best.fitness:.3f})...")

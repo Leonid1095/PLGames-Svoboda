@@ -212,6 +212,83 @@ class ServerSync:
             logger.warning("Server push error: %s", exc)
             return False
 
+    # ─── Collective Intelligence (Phase 3) ──────────────────────────────
+
+    def get_instant_strategy(self, isp: str, dpi_type: str = "unknown") -> Optional[dict]:
+        """Get the best community strategy for this ISP from server.
+
+        Returns {"flags": [...], "fitness": 0.8, "report_count": 12} or None.
+        """
+        if not self.is_configured or not self._api_key:
+            return None
+        try:
+            resp = requests.get(
+                f"{self._api_url}/api/v1/strategies/instant",
+                params={"isp": isp, "dpi_type": dpi_type},
+                headers=self._headers(),
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                strategy = data.get("strategy")
+                if strategy and strategy.get("flags"):
+                    logger.info(
+                        "Got instant strategy from community: fitness=%.3f, %d reports",
+                        strategy["fitness"], strategy["report_count"],
+                    )
+                    return strategy
+        except requests.RequestException as exc:
+            logger.debug("Instant strategy fetch failed: %s", exc)
+        return None
+
+    def vote_strategy(
+        self, flags: list[str], success: bool, fitness: float = 0.0,
+        isp: str = "unknown", dpi_type: str = "unknown",
+    ) -> bool:
+        """Vote for/against a strategy (community feedback)."""
+        if not self.is_configured or not self._api_key:
+            return False
+        try:
+            resp = requests.post(
+                f"{self._api_url}/api/v1/strategies/vote",
+                json={
+                    "install_id": self._install_id,
+                    "flags": flags,
+                    "success": success,
+                    "fitness": fitness,
+                    "isp": isp,
+                    "dpi_type": dpi_type,
+                },
+                headers=self._headers(),
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                logger.info("Voted %s for strategy (fitness=%.3f)", "success" if success else "failure", fitness)
+                return True
+        except requests.RequestException:
+            pass
+        return False
+
+    def check_tspu_status(self, isp: str) -> Optional[dict]:
+        """Check if TSPU firmware was updated for this ISP."""
+        if not self.is_configured or not self._api_key:
+            return None
+        try:
+            resp = requests.get(
+                f"{self._api_url}/api/v1/tspu/status",
+                params={"isp": isp},
+                headers=self._headers(),
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("tspu_updated"):
+                    logger.warning("TSPU update detected for %s!", isp)
+                return data
+        except requests.RequestException:
+            pass
+        return None
+
     # ─── Pull: get updated strategies from server ──────────────────────────
 
     def _pull_strategies(self) -> list[dict]:

@@ -603,6 +603,162 @@ async def get_server_stats(x_api_key: Optional[str] = Header(None)):
         conn.close()
 
 
+# ─── Collective Intelligence (Phase 3) ────────────────────────────────────────
+
+class StrategyVoteRequest(BaseModel):
+    install_id: str
+    flags: list[str]
+    success: bool
+    fitness: float = 0.0
+    isp: str = "unknown"
+    dpi_type: str = "unknown"
+    region: str = ""
+
+
+@app.get("/api/v1/strategies/instant")
+async def get_instant_strategy(
+    isp: str = Query(...),
+    dpi_type: str = Query("unknown"),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Return the single best strategy for this ISP+DPI combo.
+
+    Ranked by confidence_score = avg_fitness * log2(report_count + 1) * recency_weight.
+    Only returns strategies with report_count >= 3 and avg_fitness >= 0.5.
+    """
+    _verify_api_key(x_api_key)
+    conn = get_db()
+    try:
+        cursor = conn.execute(
+            """SELECT flags, avg_fitness, report_count, last_reported, isp
+               FROM strategy_scores
+               WHERE isp = ? AND avg_fitness >= 0.5 AND report_count >= 3
+               ORDER BY avg_fitness * (1.0 + report_count * 0.1) DESC
+               LIMIT 1""",
+            (isp,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            # Fallback: any ISP with good score
+            cursor = conn.execute(
+                """SELECT flags, avg_fitness, report_count, last_reported, isp
+                   FROM strategy_scores
+                   WHERE avg_fitness >= 0.6 AND report_count >= 5
+                   ORDER BY avg_fitness * (1.0 + report_count * 0.1) DESC
+                   LIMIT 1""",
+            )
+            row = cursor.fetchone()
+
+        if not row:
+            return {"strategy": None, "reason": "No community strategies available yet"}
+
+        return {
+            "strategy": {
+                "flags": json.loads(row[0]),
+                "fitness": round(row[1], 3),
+                "report_count": row[2],
+                "isp": row[4],
+            },
+            "confidence_score": round(row[1] * (1.0 + row[2] * 0.1), 3),
+        }
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/strategies/vote")
+async def vote_strategy(
+    req: StrategyVoteRequest,
+    x_api_key: Optional[str] = Header(None),
+):
+    """Record a vote (success/failure) for a strategy from a real user."""
+    _verify_api_key(x_api_key)
+    conn = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    flags_json = json.dumps(req.flags, ensure_ascii=False)
+
+    try:
+        # Update strategy_scores with this vote
+        if req.success:
+            conn.execute(
+                """INSERT INTO strategy_scores (flags, fitness, isp, middlebox_type, region, report_count, avg_fitness, last_reported)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                   ON CONFLICT(flags, isp) DO UPDATE SET
+                     report_count = report_count + 1,
+                     avg_fitness = (avg_fitness * report_count + excluded.fitness) / (report_count + 1),
+                     last_reported = excluded.last_reported""",
+                (flags_json, req.fitness, req.isp, req.dpi_type, req.region, req.fitness, now),
+            )
+        else:
+            # Negative vote: reduce avg_fitness
+            conn.execute(
+                """INSERT INTO strategy_scores (flags, fitness, isp, middlebox_type, region, report_count, avg_fitness, last_reported)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?)
+                   ON CONFLICT(flags, isp) DO UPDATE SET
+                     report_count = report_count + 1,
+                     avg_fitness = (avg_fitness * report_count + 0.0) / (report_count + 1),
+                     last_reported = excluded.last_reported""",
+                (flags_json, 0.0, req.isp, req.dpi_type, req.region, 0.0, now),
+            )
+
+        conn.commit()
+        return {"status": "ok", "voted": "success" if req.success else "failure"}
+    finally:
+        conn.close()
+
+
+@app.get("/api/v1/tspu/status")
+async def tspu_status(
+    isp: str = Query(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Detect TSPU firmware updates by tracking fitness drops.
+
+    If average fitness for an ISP drops >30% in last hour vs 24h average,
+    it likely means TSPU got updated.
+    """
+    _verify_api_key(x_api_key)
+    conn = get_db()
+    try:
+        # 24h average fitness for this ISP
+        cur = conn.execute(
+            """SELECT AVG(avg_fitness), COUNT(*) FROM strategy_scores
+               WHERE isp = ? AND report_count >= 2""",
+            (isp,),
+        )
+        row = cur.fetchone()
+        avg_24h = row[0] if row and row[0] else 0.0
+        total_strategies = row[1] if row else 0
+
+        # Recent events (last hour) — check if fitness dropping
+        one_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        cur = conn.execute(
+            """SELECT AVG(CAST(json_extract(payload, '$.fitness') AS REAL))
+               FROM telemetry_events
+               WHERE event_type = 'strategy_result'
+                 AND received_at >= ?
+                 AND json_extract(payload, '$.isp') = ?""",
+            (one_hour_ago, isp),
+        )
+        row = cur.fetchone()
+        avg_1h = row[0] if row and row[0] else avg_24h
+
+        # Detect significant drop
+        tspu_updated = False
+        if avg_24h > 0.3 and avg_1h < avg_24h * 0.7:
+            tspu_updated = True
+
+        return {
+            "isp": isp,
+            "avg_fitness_24h": round(avg_24h, 3),
+            "avg_fitness_1h": round(avg_1h, 3),
+            "total_strategies": total_strategies,
+            "tspu_updated": tspu_updated,
+            "message": "TSPU firmware may have been updated — re-evolve strategies" if tspu_updated else "No changes detected",
+        }
+    finally:
+        conn.close()
+
+
 @app.get("/api/v1/health")
 async def health_check():
     return {"status": "ok", "timestamp": datetime.now(timezone.utc).isoformat()}
