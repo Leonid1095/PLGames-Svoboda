@@ -547,7 +547,7 @@ class ConnectionTester:
         try:
             result = subprocess.run(
                 [
-                    "curl", "-s", "--http2",
+                    "curl", "-s",
                     "--max-time", str(timeout),
                     "-r", "0-65535",
                     f"https://{host}",

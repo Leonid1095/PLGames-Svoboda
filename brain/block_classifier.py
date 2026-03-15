@@ -179,10 +179,10 @@ class BlockageClassifier:
         """Detailed curl test with timing breakdown."""
         try:
             # curl with detailed timing output
-            fmt = "%{http_code}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}|%{exitcode}"
+            fmt = "%{http_code}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}"
             result = subprocess.run(
                 [
-                    "curl", "-s", "--http2",
+                    "curl", "-s",
                     "--max-time", str(self.timeout),
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
@@ -234,7 +234,7 @@ class BlockageClassifier:
             # Download 64KB — tests if connection stays alive after handshake
             result = subprocess.run(
                 [
-                    "curl", "-s", "--http2",
+                    "curl", "-s",
                     "--max-time", str(self.timeout + 3),
                     "-r", "0-65535",
                     f"https://{host}",
