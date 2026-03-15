@@ -451,6 +451,23 @@ def main():
     print()
     hostlist = _download_hostlist(BASE_DIR)
 
+    # ─── TSPU Profiling ─────────────────────────────────────────────
+    from brain.tspu_profiler import TSPUProfiler
+    tspu_profile = None
+    try:
+        print()
+        print("  Profiling DPI/TSPU...")
+        tspu = TSPUProfiler(timeout=5)
+        tspu_profile = tspu.profile("youtube.com", isp=isp_name, asn=asn if 'asn' in dir() else "")
+        if tspu_profile.dpi_hop_distance:
+            print(f"  [OK] DPI at ~{tspu_profile.dpi_hop_distance} hops, type: {tspu_profile.dpi_type}")
+            if tspu_profile.recommended_ttl:
+                print(f"       Recommended fake TTL: {tspu_profile.recommended_ttl}")
+        for e in tspu_profile.evidence[:3]:
+            print(f"       {e}")
+    except Exception as exc:
+        print(f"  [!] TSPU profiling error: {exc}")
+
     # ─── Smart block detection ──────────────────────────────────────
     from brain.block_classifier import classify_and_print, BlockageClassifier
 
