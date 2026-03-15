@@ -464,28 +464,36 @@ def main():
     print()
     hostlist = _download_hostlist(BASE_DIR)
 
-    # ─── Check baseline connectivity ─────────────────────────────────
+    # ─── Smart block detection ──────────────────────────────────────
+    from brain.block_classifier import classify_and_print, BlockageClassifier
+
     hosts = config.get("test_hosts", ["youtube.com", "discord.com", "cdn.discordapp.com"])
     print()
-    print("  Checking baseline connectivity...")
-    baseline = _quick_connectivity_check(hosts)
-    for host, ok in baseline.items():
-        status = "accessible" if ok else "BLOCKED"
-        print(f"    {host}: {status}")
+    print("  Analyzing blocking methods...")
+    block_results = classify_and_print(hosts, timeout=5)
 
-    all_accessible = all(baseline.values())
+    blocked = {h: r for h, r in block_results.items() if r.block_type != "NOT_BLOCKED"}
+    all_accessible = len(blocked) == 0
+
     if all_accessible:
         print()
         print("  All sites accessible without DPI bypass.")
         print("  Starting monitoring mode (will activate if blocking detected)...")
-        # Go to monitoring mode
         _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                          ai, sync, tier, profiler, isp_name, hostlist)
         analytics.close()
         return
 
-    blocked_hosts = [h for h, ok in baseline.items() if not ok]
-    print(f"\n  {len(blocked_hosts)} site(s) blocked.")
+    # Collect block types for AI context
+    block_summary = {h: r.block_type for h, r in blocked.items()}
+    print(f"\n  {len(blocked)} site(s) blocked: {', '.join(f'{h}={t}' for h, t in block_summary.items())}")
+
+    # Collect recommended strategies from classifier
+    classifier_strategies: list[list[str]] = []
+    for r in blocked.values():
+        for s in r.recommended_strategies:
+            if s not in classifier_strategies:
+                classifier_strategies.append(s)
 
     # ─── Quick start: try last known working strategy first ──────────
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
@@ -579,17 +587,28 @@ def main():
             print(f"  [!] Cached strategy outdated (fitness={verified:.3f}), evolving...")
 
     # ─── Fast enumeration (blockcheck2-style) ──────────────────────
-    from brain.enumerator import StrategyEnumerator
+    from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
 
-    print(f"\n  Fast strategy enumeration (testing known strategies)...")
-    enumerator = StrategyEnumerator()
+    # Build priority list: classifier recommendations first, then known strategies
+    priority_strategies = []
+    for i, flags in enumerate(classifier_strategies):
+        priority_strategies.append({
+            "name": f"ai_recommended_{i+1}",
+            "flags": flags,
+            "desc": f"AI-recommended for detected block type",
+        })
+    # Add standard known strategies after
+    priority_strategies.extend(KNOWN_STRATEGIES)
+
+    print(f"\n  Fast strategy enumeration ({len(priority_strategies)} strategies, AI-prioritized)...")
+    enumerator = StrategyEnumerator(strategies=priority_strategies)
 
     def _enum_progress(i, total, name, fitness):
         status = "OK" if fitness >= 0.6 else "fail"
         print(f"    [{i}/{total}] {name}: {fitness:.3f} ({status})")
 
     enum_result = enumerator.enumerate(
-        tester, threshold=0.6, on_progress=_enum_progress,
+        tester, threshold=0.5, on_progress=_enum_progress,
     )
 
     if enum_result:

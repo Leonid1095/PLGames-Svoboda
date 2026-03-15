@@ -350,11 +350,10 @@ class ConnectionTester:
         cmd = [str(self._zapret_bin)]
 
         if self._is_windows:
-            # Windows: winws2 with WinDivert
+            # Windows: winws2 with WinDivert (outgoing only for testing)
             cmd.extend([
                 "--wf-tcp-out=80,443",
                 "--wf-udp-out=443",
-                "--wf-tcp-in=80,443",    # capture incoming for autottl
             ])
         else:
             # Linux: nfqws2 with netfilter queue
@@ -389,8 +388,6 @@ class ConnectionTester:
         cmd.extend([
             "--filter-tcp=80,443",
             "--filter-l7=tls,http",
-            "--out-range=-s34228",       # first ~32KB outgoing
-            "--in-range=-s5556",         # first ~5KB incoming (for autottl)
             "--payload=tls_client_hello,http_req",
         ])
 
