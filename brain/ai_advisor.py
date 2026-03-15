@@ -101,14 +101,14 @@ class AIAdvisor:
         self._server_key = key
 
     def suggest_strategies(self, isp: str, middlebox_type: str = "unknown", region: str = "") -> list[list[str]]:
-        """Ask AI to suggest new strategies based on collected data."""
-        if not self.is_available:
-            return []
+        """Ask AI to suggest new strategies based on collected data.
 
-        # Gather context from analytics
-        context = self._build_context(isp, middlebox_type, region)
-
-        prompt = f"""Suggest 3-5 zapret2 desync strategies for this network:
+        Falls back to built-in expert strategies if server is unavailable.
+        """
+        # Try server AI first
+        if self.is_available:
+            context = self._build_context(isp, middlebox_type, region)
+            prompt = f"""Suggest 3-5 zapret2 desync strategies for this network:
 
 ISP: {isp}
 Middlebox: {middlebox_type}
@@ -118,15 +118,52 @@ Region: {region}
 
 Return ONLY a JSON array of flag arrays using the allowed flags. No explanation, no markdown."""
 
-        try:
-            response = self._chat(prompt)
-            strategies = self._parse_strategies(response)
-            if strategies:
-                logger.info("AI suggested %d strategies for %s", len(strategies), isp)
-            return strategies
-        except Exception as exc:
-            logger.warning("AI suggestion failed: %s", exc)
-            return []
+            try:
+                response = self._chat(prompt)
+                strategies = self._parse_strategies(response)
+                if strategies:
+                    logger.info("AI suggested %d strategies for %s", len(strategies), isp)
+                    return strategies
+            except Exception as exc:
+                logger.warning("AI suggestion failed: %s", exc)
+
+        # Fallback: built-in expert strategies based on analytics
+        return self._builtin_expert_strategies(isp)
+
+    def _builtin_expert_strategies(self, isp: str) -> list[list[str]]:
+        """Built-in expert strategies when AI server is unavailable.
+
+        Based on zapret2 documentation + known TSPU behavior patterns.
+        Prioritizes strategies by what works for Russian ISPs.
+        """
+        # Check analytics for what worked before
+        best_known = self._analytics.get_best_flags_for_isp(isp, limit=3)
+        strategies: list[list[str]] = []
+
+        # Re-use top known strategies with mutations
+        for s in best_known:
+            if s["fitness"] > 0.3:
+                strategies.append(s["flags"])
+
+        # Expert strategies for Russian TSPU (proven patterns)
+        expert = [
+            # multidisorder works well against TSPU sequence analysis
+            ["multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000"],
+            # fake with low TTL — DPI sees fake, real server ignores it
+            ["fake:blob=fake_default_tls:ip_ttl=3:ip6_ttl=3:tcp_md5:repeats=8", "multisplit:pos=midsld"],
+            # multisplit at multiple positions
+            ["multisplit:pos=1,midsld,endhost-1:seqovl=6:seqovl_pattern=0x1603030000"],
+            # multidisorder with seqovl — effective against reassembly-based DPI
+            ["multidisorder:pos=1:seqovl=3", "multidisorder:pos=midsld"],
+            # fake + multidisorder combo
+            ["fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5", "multidisorder:pos=midsld:seqovl=5"],
+            # aggressive: low TTL + high repeats + split
+            ["fake:blob=fake_default_tls:ip_ttl=2:ip6_ttl=2:tcp_md5:repeats=11", "multidisorder:pos=1,midsld"],
+        ]
+
+        strategies.extend(expert)
+        logger.info("Built-in expert: %d strategies (incl %d from analytics)", len(strategies), len(best_known))
+        return strategies
 
     def analyze_failure(self, flags: list[str], fitness: float, isp: str) -> Optional[str]:
         """Ask AI to analyze why a strategy has low fitness."""

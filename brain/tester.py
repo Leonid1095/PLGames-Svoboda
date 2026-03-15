@@ -15,10 +15,34 @@ import random
 import shutil
 import subprocess
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("svoboda.tester")
+
+
+# ─── Test result data ─────────────────────────────────────────────────────────
+
+@dataclass
+class HostTestResult:
+    """Result of a single curl test to one host."""
+    host: str
+    success: bool
+    http_code: int = 0
+    latency_ms: float = 0.0
+    error_type: str = ""  # "" | "timeout" | "rst" | "dns" | "refused" | "error"
+
+
+@dataclass
+class StrategyTestReport:
+    """Aggregated results for one strategy across all hosts/trials."""
+    flags: list[str]
+    fitness: float = 0.0
+    host_results: dict = field(default_factory=dict)  # host -> {successes, total, avg_latency_ms, error_types}
+    total_success: int = 0
+    total_tests: int = 0
+    avg_latency_ms: float = 0.0
 
 # ─── Mock fitness: effective combo patterns ──────────────────────────────────
 
@@ -86,12 +110,15 @@ class ConnectionTester:
         self.hosts: list[str] = config.get("test_hosts", ["youtube.com", "discord.com", "x.com"])
         self.trials: int = config.get("test_trials", 3)
         self.timeout: int = config.get("test_timeout", 5)
+        self._evo_timeout: int = min(self.timeout, 3)  # shorter timeout during evolution
+        self._evo_trials: int = 1  # 1 trial per host during evolution (fast screening)
         self._base_dir = Path(config.get("_base_dir", "."))
         self._is_windows = platform.system() == "Windows"
         self._zapret_bin = self._resolve_zapret_binary()
         self._zapret_dir = self._zapret_bin.parent if self._zapret_bin else None
         self._lua_dir = self._resolve_lua_dir()
         self._shadow_process: Optional[subprocess.Popen] = None
+        self._last_report: Optional[StrategyTestReport] = None
 
     def test_strategy(self, flags: list[str]) -> float:
         """Evaluate strategy. Returns fitness 0.0-1.0.
@@ -114,46 +141,186 @@ class ConnectionTester:
     # ─── Real testing ──────────────────────────────────────────────────────
 
     def _test_real(self, flags: list[str]) -> float:
-        """Real testing through shadow zapret2 instance + curl."""
+        """Real testing through shadow zapret2 instance + curl.
+
+        Fitness formula (0.0 - 1.0):
+          base    = success_rate (0-1)              — weight 0.60
+          latency = latency bonus (fast < 1s)       — weight 0.25
+          penalty = error type penalty (RST worse)  — weight 0.15
+
+        Uses fail-fast: if first host test fails, skips remaining
+        to avoid prolonged broken connectivity.
+        """
         if not self._zapret_bin:
             logger.error("zapret2 binary not found, falling back to mock")
             return self._test_mock(flags)
+
+        successful = 0
+        total_tests = 0
+        all_results: list[HostTestResult] = []
+        # During evolution: 1 trial, shorter timeout for fast screening
+        trials = self._evo_trials
+        timeout = self._evo_timeout
 
         try:
             # 1. Start shadow zapret2 with strategy
             self._start_shadow_zapret(flags)
 
-            # 2. Wait for zapret2 to initialize
-            time.sleep(2)
+            # 2. Wait for zapret2 to initialize + WinDivert driver load
+            time.sleep(1.5)
 
             if self._shadow_process is None or self._shadow_process.poll() is not None:
-                logger.error("Shadow zapret2 failed to start")
+                # Read stderr for crash reason
+                stderr_msg = ""
+                if self._shadow_process and self._shadow_process.stderr:
+                    try:
+                        stderr_msg = self._shadow_process.stderr.read().decode(errors="replace")[:500]
+                    except Exception:
+                        pass
+                logger.error("Shadow zapret2 failed to start: %s", stderr_msg or "(no output)")
                 return 0.0
 
-            # 3. Test each host
-            total_tests = len(self.hosts) * self.trials
-            successful = 0
-
+            # 3. Test each host with fail-fast
+            consecutive_fails = 0
             for host in self.hosts:
-                for trial in range(self.trials):
-                    if self._curl_test(host):
+                for trial in range(trials):
+                    r = self._curl_test(host, timeout_override=timeout)
+                    all_results.append(r)
+                    total_tests += 1
+                    if r.success:
                         successful += 1
+                        consecutive_fails = 0
+                    else:
+                        consecutive_fails += 1
 
-            fitness = successful / total_tests if total_tests > 0 else 0.0
+                    # FAIL-FAST: if first 2 tests both fail, this strategy
+                    # is likely breaking all traffic — abort immediately
+                    if consecutive_fails >= 2 and successful == 0:
+                        logger.debug("Fail-fast: %d consecutive failures, aborting", consecutive_fails)
+                        break
+
+                if consecutive_fails >= 2 and successful == 0:
+                    break
 
         except Exception as exc:
             logger.error("Test failed: %s", exc)
-            fitness = 0.0
+            return 0.0
 
         finally:
-            # 4. Stop shadow zapret2
+            # 4. Stop shadow zapret2 IMMEDIATELY
             self._stop_shadow_zapret()
 
+        if total_tests == 0:
+            return 0.0
+
+        # ── Compute composite fitness ──────────────────────────────────────
+        fitness = self._compute_fitness(all_results, successful, total_tests)
+
+        # ── Build per-host report for analytics ────────────────────────────
+        self._last_report = self._build_report(flags, all_results, fitness)
+
         logger.info(
-            "Real test: flags=%s fitness=%.3f (%d/%d)",
+            "Real test: flags=%s fitness=%.3f (%d/%d) avg_latency=%.0fms",
             " | ".join(flags), fitness, successful, total_tests,
+            self._last_report.avg_latency_ms,
         )
         return round(fitness, 3)
+
+    def test_strategy_thorough(self, flags: list[str]) -> float:
+        """Full test with all trials — use after evolution to verify winner."""
+        if self.mock:
+            return self._test_mock(flags)
+
+        # Save and restore evolution settings
+        saved_trials = self._evo_trials
+        saved_timeout = self._evo_timeout
+        self._evo_trials = self.trials  # full trials (3)
+        self._evo_timeout = self.timeout  # full timeout (5s)
+        try:
+            return self._test_real(flags)
+        finally:
+            self._evo_trials = saved_trials
+            self._evo_timeout = saved_timeout
+
+    @staticmethod
+    def _compute_fitness(
+        results: list[HostTestResult], successful: int, total: int,
+    ) -> float:
+        """Composite fitness: success rate + latency bonus - error penalty.
+
+        Components (weights sum to 1.0):
+          success_rate  (0.60) — fraction of successful tests
+          latency_bonus (0.25) — reward fast responses (< 1000ms ideal)
+          error_penalty (0.15) — RST/refused = full penalty, timeout = partial
+        """
+        # 1. Base success rate
+        success_rate = successful / total
+
+        # 2. Latency bonus: only for successful requests
+        ok_results = [r for r in results if r.success and r.latency_ms > 0]
+        if ok_results:
+            avg_latency = sum(r.latency_ms for r in ok_results) / len(ok_results)
+            # 0ms → 1.0, 1000ms → 0.5, 3000ms → ~0.25, 5000ms+ → ~0.15
+            latency_bonus = 1.0 / (1.0 + avg_latency / 1000.0)
+        else:
+            latency_bonus = 0.0
+
+        # 3. Error penalty: classify failures
+        fail_results = [r for r in results if not r.success]
+        if fail_results:
+            rst_count = sum(1 for r in fail_results if r.error_type == "rst")
+            timeout_count = sum(1 for r in fail_results if r.error_type == "timeout")
+            other_count = len(fail_results) - rst_count - timeout_count
+            # RST = active blocking (full penalty), timeout = passive (partial)
+            penalty_score = (rst_count * 1.0 + timeout_count * 0.6 + other_count * 0.3) / total
+        else:
+            penalty_score = 0.0
+
+        fitness = (
+            0.60 * success_rate
+            + 0.25 * latency_bonus
+            - 0.15 * penalty_score
+        )
+
+        return max(0.0, min(1.0, fitness))
+
+    def _build_report(
+        self, flags: list[str], results: list[HostTestResult], fitness: float,
+    ) -> StrategyTestReport:
+        """Aggregate per-host stats for logging and analytics."""
+        report = StrategyTestReport(flags=flags, fitness=fitness)
+        host_data: dict[str, dict] = {}
+
+        for r in results:
+            if r.host not in host_data:
+                host_data[r.host] = {
+                    "successes": 0, "total": 0,
+                    "latencies": [], "error_types": [],
+                }
+            d = host_data[r.host]
+            d["total"] += 1
+            if r.success:
+                d["successes"] += 1
+            if r.latency_ms > 0:
+                d["latencies"].append(r.latency_ms)
+            if r.error_type:
+                d["error_types"].append(r.error_type)
+
+        for host, d in host_data.items():
+            avg_lat = sum(d["latencies"]) / len(d["latencies"]) if d["latencies"] else 0
+            report.host_results[host] = {
+                "successes": d["successes"],
+                "total": d["total"],
+                "avg_latency_ms": round(avg_lat, 1),
+                "error_types": list(set(d["error_types"])),
+            }
+
+        report.total_success = sum(d["successes"] for d in host_data.values())
+        report.total_tests = sum(d["total"] for d in host_data.values())
+
+        all_lats = [r.latency_ms for r in results if r.latency_ms > 0]
+        report.avg_latency_ms = round(sum(all_lats) / len(all_lats), 1) if all_lats else 0
+        return report
 
     # ─── Shadow zapret2 management ─────────────────────────────────────────
 
@@ -175,13 +342,18 @@ class ConnectionTester:
             self._setup_linux_shadow_nfqueue()
 
         # Load Lua libraries (required for zapret2)
+        # Use relative paths from cwd (binary dir) to avoid spaces-in-path issues
         if self._lua_dir:
+            import os
             lib_path = self._lua_dir / "zapret-lib.lua"
             antidpi_path = self._lua_dir / "zapret-antidpi.lua"
+            base = str(self._zapret_dir) if self._zapret_dir else "."
             if lib_path.exists():
-                cmd.append(f"--lua-init=@{lib_path}")
+                rel = os.path.relpath(str(lib_path), base)
+                cmd.append(f"--lua-init=@{rel}")
             if antidpi_path.exists():
-                cmd.append(f"--lua-init=@{antidpi_path}")
+                rel = os.path.relpath(str(antidpi_path), base)
+                cmd.append(f"--lua-init=@{rel}")
 
         # TLS filters
         cmd.extend([
@@ -219,7 +391,7 @@ class ConnectionTester:
             self._shadow_process = None
 
     def _stop_shadow_zapret(self) -> None:
-        """Stop shadow zapret2 instance."""
+        """Stop shadow zapret2 instance. Uses taskkill as fallback on Windows."""
         if self._shadow_process is None:
             return
 
@@ -232,50 +404,114 @@ class ConnectionTester:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait(timeout=2)
+                try:
+                    proc.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    pass
 
             logger.debug("Shadow zapret2 stopped (pid=%d)", proc.pid)
         except Exception as exc:
             logger.warning("Error stopping shadow zapret2: %s", exc)
 
-        if not self._is_windows:
+        # Fallback: force-kill any remaining winws2 processes
+        if self._is_windows:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "winws2.exe"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=3,
+                )
+            except Exception:
+                pass
+        else:
             self._cleanup_linux_shadow_nfqueue()
 
     # ─── curl testing ──────────────────────────────────────────────────────
 
-    def _curl_test(self, host: str) -> bool:
-        """Single curl test. Returns True if successful."""
+    # curl exit codes that indicate specific failure types
+    _CURL_RST_CODES = {7, 56}        # connection refused / reset
+    _CURL_TIMEOUT_CODES = {28}        # operation timed out
+    _CURL_DNS_CODES = {6}             # could not resolve host
+    _CURL_SSL_CODES = {35, 51, 60}    # SSL errors
+
+    def _curl_test(self, host: str, timeout_override: int = 0) -> HostTestResult:
+        """Single curl test with latency measurement and error classification."""
+        t = timeout_override or self.timeout
         try:
+            # -w format: "HTTP_CODE|TIME_TOTAL_MS"
             result = subprocess.run(
                 [
                     "curl", "-s",
-                    "--max-time", str(self.timeout),
+                    "--max-time", str(t),
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
-                    "-w", "%{http_code}",
+                    "-w", "%{http_code}|%{time_total}",
                 ],
                 capture_output=True,
                 text=True,
-                timeout=self.timeout + 3,
+                timeout=t + 3,
             )
 
-            if result.returncode == 0 and result.stdout.strip():
-                try:
-                    code = int(result.stdout.strip())
-                    success = code in _SUCCESS_CODES
-                    logger.debug("curl %s: HTTP %d (%s)", host, code, "OK" if success else "FAIL")
-                    return success
-                except ValueError:
-                    pass
+            # Parse "CODE|TIME" output
+            parts = result.stdout.strip().split("|")
+            http_code = 0
+            latency_ms = 0.0
+            try:
+                http_code = int(parts[0])
+            except (ValueError, IndexError):
+                pass
+            try:
+                latency_ms = round(float(parts[1]) * 1000, 1)  # seconds → ms
+            except (ValueError, IndexError):
+                pass
+
+            # Success: clean exit + success code, OR success code + timeout
+            # (timeout with HTTP 200 = page loaded but body too large for timeout)
+            if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
+                logger.debug("curl %s: HTTP %d in %.0fms (OK)", host, http_code, latency_ms)
+                return HostTestResult(
+                    host=host, success=True, http_code=http_code,
+                    latency_ms=latency_ms, error_type="",
+                )
+
+            # Classify error by curl exit code
+            error_type = self._classify_curl_error(result.returncode)
+            logger.debug(
+                "curl %s: HTTP %d, exit=%d, %.0fms (%s)",
+                host, http_code, result.returncode, latency_ms, error_type,
+            )
+            return HostTestResult(
+                host=host, success=False, http_code=http_code,
+                latency_ms=latency_ms, error_type=error_type,
+            )
 
         except subprocess.TimeoutExpired:
-            logger.debug("curl %s: timeout", host)
+            logger.debug("curl %s: process timeout", host)
+            return HostTestResult(
+                host=host, success=False, http_code=0,
+                latency_ms=self.timeout * 1000, error_type="timeout",
+            )
         except FileNotFoundError:
             logger.error("curl not found in PATH")
+            return HostTestResult(host=host, success=False, error_type="error")
         except Exception as exc:
             logger.debug("curl %s: error %s", host, exc)
+            return HostTestResult(host=host, success=False, error_type="error")
 
-        return False
+    @classmethod
+    def _classify_curl_error(cls, returncode: int) -> str:
+        """Map curl exit code to error category."""
+        if returncode == 0:
+            return ""
+        if returncode in cls._CURL_RST_CODES:
+            return "rst"
+        if returncode in cls._CURL_TIMEOUT_CODES:
+            return "timeout"
+        if returncode in cls._CURL_DNS_CODES:
+            return "dns"
+        if returncode in cls._CURL_SSL_CODES:
+            return "ssl"
+        return "error"
 
     # ─── Linux shadow nfqueue ──────────────────────────────────────────────
 

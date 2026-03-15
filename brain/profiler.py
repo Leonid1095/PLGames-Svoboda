@@ -41,26 +41,26 @@ MIDDLEBOX_SIGNATURES: dict[str, dict] = {
 # Предустановленные seed-стратегии по ISP
 ISP_SEED_STRATEGIES: dict[str, list[list[str]]] = {
     "rostelecom": [
-        ["--dpi-desync=disorder2", "--dpi-desync-ttl=5", "--dpi-desync-split-pos=3"],
-        ["--dpi-desync=disorder2", "--dpi-desync-ttl=5", "--dpi-desync-fooling=badseq"],
+        ["fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5", "multidisorder:pos=3"],
+        ["fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_seq=-10000", "multidisorder:pos=midsld"],
     ],
     "mts": [
-        ["--dpi-desync=multisplit", "--dpi-desync-fooling=badseq", "--dpi-desync-ttl=8"],
-        ["--dpi-desync=multisplit", "--dpi-desync-fooling=md5sig", "--dpi-desync-ttl=7"],
+        ["fake:blob=fake_default_tls:ip_ttl=8:ip6_ttl=8:tcp_md5", "multisplit:pos=midsld"],
+        ["fake:blob=fake_default_tls:ip_ttl=7:ip6_ttl=7:tcp_md5:tls_mod=rnd,rndsni", "multisplit:pos=midsld"],
     ],
     "megafon": [
-        ["--dpi-desync=fake", "--dpi-desync-ipfrag=1", "--dpi-desync-ttl=6"],
-        ["--dpi-desync=fake", "--dpi-desync-ttl=6", "--dpi-desync-split-pos=2"],
+        ["fake:blob=fake_default_tls:ip_ttl=6:ip6_ttl=6:tcp_md5", "send:ipfrag", "drop"],
+        ["fake:blob=fake_default_tls:ip_ttl=6:ip6_ttl=6", "fakedsplit:pos=2"],
     ],
     "tele2": [
-        ["--dpi-desync=overlap", "--dpi-desync-fooling=badsum", "--dpi-desync-ttl=4"],
-        ["--dpi-desync=overlap", "--dpi-desync-fooling=badseq", "--dpi-desync-ttl=5"],
+        ["fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ack=-66000", "multidisorder:pos=midsld"],
+        ["fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_seq=-10000", "multidisorder:pos=midsld"],
     ],
     "beeline": [
-        ["--dpi-desync=fake", "--dpi-desync-ttl=6", "--dpi-desync-fooling=badseq"],
+        ["fake:blob=fake_default_tls:ip_ttl=6:ip6_ttl=6:tcp_seq=-10000:tcp_md5"],
     ],
     "tattelecom": [
-        ["--dpi-desync=disorder2", "--dpi-desync-ttl=4", "--dpi-desync-split-pos=2"],
+        ["fakedsplit:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4", "multidisorder:pos=2"],
     ],
 }
 

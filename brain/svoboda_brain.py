@@ -287,40 +287,101 @@ class SvobodaBrain:
     # ─── zapret2 process management ────────────────────────────────────────
 
     def _start_zapret(self, flags: list[str]) -> None:
-        """Start main zapret2 process."""
+        """Start main zapret2 process with lua-desync strategy."""
         self._stop_zapret()
 
         is_windows = platform.system() == "Windows"
         base = Path(self.config.get("_base_dir", "."))
 
+        # Find zapret2 binary
+        binary_path = self._find_zapret_binary(base)
+        if not binary_path:
+            self._logger.warning("zapret2 binary not found (running in data collection mode)")
+            return
+
+        # Find Lua libraries
+        lua_dir = self._find_lua_dir(base)
+
+        cmd = [str(binary_path)]
+
         if is_windows:
-            binary = self.config.get("zapret_binary_windows", "winws2.exe")
+            cmd.extend(["--wf-tcp-out=80,443", "--wf-udp-out=443"])
         else:
-            binary = self.config.get("zapret_binary_linux", "nfqws2")
+            cmd.extend(["--qnum=200"])
 
-        lua_path = base / self.config.get("lua_strategy_path", "lua/svoboda_strategy.lua")
+        # Load Lua libraries
+        if lua_dir:
+            lib = lua_dir / "zapret-lib.lua"
+            antidpi = lua_dir / "zapret-antidpi.lua"
+            if lib.exists():
+                cmd.append(f"--lua-init=@{lib}")
+            if antidpi.exists():
+                cmd.append(f"--lua-init=@{antidpi}")
 
-        cmd = [binary]
-        if not is_windows:
-            cmd.extend(["--qnum=0"])
-        cmd.extend(["--wf-tcp=443", "--wf-udp=443"])
-        cmd.append(f"--lua-desync={lua_path}")
-        cmd.extend(flags)
+        # Filters
+        cmd.extend([
+            "--filter-tcp=80,443", "--filter-l7=tls,http",
+            "--out-range=-d10",
+            "--payload=tls_client_hello,http_req",
+        ])
 
-        self._logger.info("Starting optimizer: %s", " ".join(cmd))
+        # Strategy lua-desync calls
+        for call in flags:
+            cmd.append(f"--lua-desync={call}")
+
+        # QUIC support
+        cmd.extend([
+            "--new",
+            "--filter-udp=443", "--filter-l7=quic",
+            "--payload=quic_initial",
+            "--lua-desync=fake:blob=fake_default_quic:repeats=4",
+        ])
+
+        cwd = str(binary_path.parent) if is_windows else None
+
+        self._logger.info("Starting zapret2: %s", " ".join(cmd))
 
         try:
             self._zapret_process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.PIPE,
+                cwd=cwd,
                 creationflags=subprocess.CREATE_NO_WINDOW if is_windows else 0,
             )
-            self._logger.info("Optimizer started (pid=%d)", self._zapret_process.pid)
+            self._logger.info("zapret2 started (pid=%d)", self._zapret_process.pid)
         except FileNotFoundError:
-            self._logger.warning("Optimizer binary not found: %s (running in data collection mode)", binary)
+            self._logger.warning("zapret2 binary not found: %s", binary_path)
         except OSError as exc:
-            self._logger.error("Failed to start optimizer: %s", exc)
+            self._logger.error("Failed to start zapret2: %s", exc)
+
+    @staticmethod
+    def _find_zapret_binary(base: Path) -> Optional[Path]:
+        """Find winws2.exe or nfqws2 binary."""
+        import shutil
+        is_win = platform.system() == "Windows"
+        name = "winws2.exe" if is_win else "nfqws2"
+
+        pattern = "zapret2*/binaries/windows-x86_64" if is_win else "zapret2*/binaries/linux-*"
+        for zdir in sorted(base.glob(pattern), reverse=True):
+            p = zdir / name
+            if p.exists():
+                return p
+
+        for p in [base / "bin" / name, base / name]:
+            if p.exists():
+                return p
+
+        found = shutil.which(name)
+        return Path(found) if found else None
+
+    @staticmethod
+    def _find_lua_dir(base: Path) -> Optional[Path]:
+        """Find zapret2 Lua libraries."""
+        for zdir in sorted(base.glob("zapret2*/lua"), reverse=True):
+            if (zdir / "zapret-lib.lua").exists():
+                return zdir
+        return None
 
     def _stop_zapret(self) -> None:
         """Stop main zapret2 process."""

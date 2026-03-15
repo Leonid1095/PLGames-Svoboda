@@ -25,7 +25,6 @@ DESYNC_FUNCTIONS = [
     "fakedsplit",
     "multisplit",
     "multidisorder",
-    "disorder",
     "syndata",
 ]
 
@@ -257,7 +256,7 @@ class StrategyGene:
                 mod = random.choice(DESYNC_PARAMS["tls_mod"])
                 params.append(f"tls_mod={mod}")
 
-        elif func in ("multisplit", "multidisorder", "disorder"):
+        elif func in ("multisplit", "multidisorder"):
             pos = random.choice(DESYNC_PARAMS["pos"])
             params.append(f"pos={pos}")
             if random.random() < 0.3:

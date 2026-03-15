@@ -3,3 +3,6 @@ requests>=2.31
 python-telegram-bot>=21.0
 schedule>=1.2
 psutil>=5.9
+pystray>=0.19
+Pillow>=10.0
+winotify>=1.1
