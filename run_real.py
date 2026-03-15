@@ -217,8 +217,6 @@ def _start_permanent_zapret(
         cmd.extend([
             "--wf-tcp-out=80,443",
             "--wf-udp-out=443",
-            "--wf-tcp-in=80,443",    # capture incoming for autottl calibration
-            "--wf-tcp-empty=1",      # count ALL packets (needed for accurate counters)
         ])
     else:
         cmd.extend(["--qnum=200"])
@@ -233,7 +231,7 @@ def _start_permanent_zapret(
         if antidpi.exists():
             cmd.append(f"--lua-init=@{os.path.relpath(str(antidpi), base)}")
 
-    # Hostlist: copy to binary dir to avoid path issues, then use relative
+    # Hostlist: copy to binary dir to avoid path issues
     if hostlist and hostlist.exists():
         import shutil
         bin_dir = binary.parent
@@ -250,31 +248,20 @@ def _start_permanent_zapret(
         except Exception as exc:
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
-    # ── Profile 1: TLS (HTTPS) ──────────────────────────────────
+    # ── Identical to tester: same filters, same strategy ─────────
+    # IMPORTANT: permanent must match what tester tested, otherwise
+    # tested strategy won't work in permanent mode
     cmd.extend([
-        "--filter-tcp=443", "--filter-l7=tls",
-        "--out-range=-s34228",       # process first ~32KB of outgoing data
-        "--in-range=-s5556",         # capture first ~5KB incoming (for autottl)
-        "--payload=tls_client_hello",
+        "--filter-tcp=80,443",
+        "--filter-l7=tls,http",
+        "--payload=tls_client_hello,http_req",
     ])
-    # Strategy 1: fake with badsum (DPI sees fake, server drops it)
-    cmd.append("--lua-desync=fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=6")
-    # Strategy 2: user-evolved strategy as fallback
+
+    # User-evolved/enumerated strategy (exactly as tested)
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # ── Profile 2: HTTP (port 80) ────────────────────────────────
-    cmd.extend([
-        "--new",
-        "--filter-tcp=80", "--filter-l7=http",
-        "--out-range=-s34228",
-        "--payload=http_req",
-    ])
-    cmd.append("--lua-desync=fake:blob=fake_default_http:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5")
-    for call in flags:
-        cmd.append(f"--lua-desync={call}")
-
-    # ── Profile 3: QUIC (UDP/443) ────────────────────────────────
+    # ── QUIC support (separate profile) ──────────────────────────
     cmd.extend([
         "--new",
         "--filter-udp=443", "--filter-l7=quic",
