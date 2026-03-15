@@ -1,9 +1,8 @@
 """AI Advisor — LLM-powered strategy analysis and recommendations.
 
-Uses PLGames AI endpoint (OpenAI-compatible API) to:
-1. Analyze collected telemetry and suggest better flag combinations
-2. Interpret middlebox signatures and recommend approaches
-3. Provide seed strategies for unknown ISPs based on aggregated knowledge
+All AI requests go through the server proxy (POST /api/v1/ai/chat).
+AI URLs, keys, and model selection are handled server-side.
+The client never sees AI credentials.
 """
 
 from __future__ import annotations
@@ -60,53 +59,34 @@ EXAMPLE OUTPUT:
 
 
 class AIAdvisor:
-    """LLM-powered strategy advisor. Tier-aware: routes to plgames-ai or DeepSeek."""
+    """LLM-powered strategy advisor. Routes through server proxy."""
 
     def __init__(self, config: dict, analytics: Analytics, tier_manager=None):
-        # Default config (used when no tier manager)
-        self._default_api_url: str = config.get("ai_api_url", "")
-        self._default_api_key: str = config.get("ai_api_key", "")
-        self._default_model: str = config.get("ai_model", "plgames-ai")
-        self._enabled: bool = config.get("ai_enabled", False)
+        self._server_url: str = config.get("server_api_url", "")
+        self._server_key: str = config.get("server_api_key", "")
+        self._enabled: bool = config.get("ai_enabled", True)
         self._analytics = analytics
-
-        # DeepSeek config (for PRO tier)
-        self._deepseek_api_url: str = config.get("deepseek_api_url", "https://api.deepseek.com/v1")
-        self._deepseek_api_key: str = config.get("deepseek_api_key", "")
-        self._deepseek_model: str = config.get("deepseek_model", "deepseek-chat")
-
-        # Tier manager (optional, for tier-aware routing)
         self._tier = tier_manager
-
-    @property
-    def _api_url(self) -> str:
-        if self._tier and self._tier.ai_api_url:
-            return self._tier.ai_api_url
-        return self._default_api_url
-
-    @property
-    def _api_key(self) -> str:
-        if self._tier and self._tier.tier == "pro" and self._deepseek_api_key:
-            return self._deepseek_api_key
-        if self._tier:
-            return self._tier.ai_api_key or self._default_api_key
-        return self._default_api_key
-
-    @property
-    def _model(self) -> str:
-        if self._tier:
-            return self._tier.ai_model
-        return self._default_model
+        self._install_id: str = config.get("install_id", "")
+        self._last_model: str = "unknown"
 
     @property
     def is_available(self) -> bool:
-        """Check if AI advisor is configured and enabled."""
-        return self._enabled and bool(self._api_url) and bool(self._api_key)
+        """Check if AI advisor can work (server URL configured)."""
+        return self._enabled and bool(self._server_url)
 
     @property
     def active_model(self) -> str:
-        """Currently active model name (for display)."""
-        return self._model
+        """Last known model (returned by server)."""
+        return self._last_model
+
+    def set_install_id(self, install_id: str) -> None:
+        """Set install_id (called after registration)."""
+        self._install_id = install_id
+
+    def set_server_key(self, key: str) -> None:
+        """Update server API key (after auto-registration)."""
+        self._server_key = key
 
     def suggest_strategies(self, isp: str, middlebox_type: str = "unknown", region: str = "") -> list[list[str]]:
         """Ask AI to suggest new strategies based on collected data."""
@@ -176,15 +156,15 @@ Strategies: {strategies_json}"""
     # ─── Internal ──────────────────────────────────────────────────────────
 
     def _chat(self, user_message: str) -> str:
-        """Send a message to the AI API."""
+        """Send a message through the server AI proxy."""
         resp = requests.post(
-            f"{self._api_url}/chat/completions",
+            f"{self._server_url}/api/v1/ai/chat",
             headers={
-                "Authorization": f"Bearer {self._api_key}",
+                "X-API-Key": self._server_key,
                 "Content-Type": "application/json",
             },
             json={
-                "model": self._model,
+                "install_id": self._install_id,
                 "messages": [
                     {"role": "system", "content": _SYSTEM_PROMPT},
                     {"role": "user", "content": user_message},
@@ -192,14 +172,19 @@ Strategies: {strategies_json}"""
                 "temperature": 0.7,
                 "max_tokens": 1024,
             },
-            timeout=30,
+            timeout=45,
         )
 
+        if resp.status_code == 429:
+            logger.info("AI rate limited: %s", resp.json().get("detail", ""))
+            raise RuntimeError("AI rate limited")
+
         if resp.status_code != 200:
-            raise RuntimeError(f"AI API error: HTTP {resp.status_code} - {resp.text[:200]}")
+            raise RuntimeError(f"AI proxy error: HTTP {resp.status_code} - {resp.text[:200]}")
 
         data = resp.json()
-        return data["choices"][0]["message"]["content"]
+        self._last_model = data.get("model", "unknown")
+        return data["content"]
 
     def _build_context(self, isp: str, middlebox_type: str, region: str) -> str:
         """Build context string from analytics data."""

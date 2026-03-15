@@ -2,17 +2,19 @@
 
 Sends anonymous strategy results and ISP profiles to the central server.
 Receives improved seed strategies back.
+Auto-registers on first run to obtain a per-install API token.
 All data is anonymous: no IP, no MAC, no hostname, no accounts.
 """
 
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
 import platform
 import threading
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 import requests
@@ -24,7 +26,6 @@ logger = logging.getLogger("svoboda.sync")
 
 def _generate_install_id() -> str:
     """Generate a stable anonymous install ID (not tied to hardware)."""
-    # Use a random UUID generated once and persisted
     return str(uuid.uuid4())
 
 
@@ -34,20 +35,44 @@ class ServerSync:
     def __init__(self, config: dict, analytics: Analytics):
         self._api_url: str = config.get("server_api_url", "")
         self._api_key: str = config.get("server_api_key", "")
-        self._sync_enabled: bool = config.get("sync_enabled", False)
+        self._sync_enabled: bool = config.get("sync_enabled", True)
         self._sync_interval: int = config.get("sync_interval_minutes", 30) * 60
         self._analytics = analytics
-        self._install_id: str = config.get("install_id", _generate_install_id())
+        self._install_id: str = config.get("install_id", "")
         self._app_version: str = config.get("app_version", "1.0.0")
+        self._config = config
+        self._base_dir = Path(config.get("_base_dir", "."))
+
+        # Load or generate install_id
+        if not self._install_id:
+            self._install_id = self._load_or_create_install_id()
 
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
+        # Components that need server key updates after registration
+        self._dependents: list = []
+
     @property
     def is_configured(self) -> bool:
         """Check if server sync is configured and enabled."""
         return bool(self._api_url) and self._sync_enabled
+
+    @property
+    def install_id(self) -> str:
+        """Public access to install_id."""
+        return self._install_id
+
+    @property
+    def api_key(self) -> str:
+        """Current API key (master or per-install token)."""
+        return self._api_key
+
+    def register_dependent(self, obj) -> None:
+        """Register an object that needs server key updates.
+        Object must have set_server_key(key) method."""
+        self._dependents.append(obj)
 
     # ─── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -79,6 +104,43 @@ class ServerSync:
         if not self.is_configured:
             return False
         return self._do_sync()
+
+    # ─── Auto-registration ────────────────────────────────────────────────
+
+    def register_if_needed(self) -> bool:
+        """Auto-register with server to get a per-install token.
+        Returns True if registered successfully or already has a key."""
+        if self._api_key:
+            return True
+        if not self._api_url:
+            return False
+
+        try:
+            resp = requests.post(
+                f"{self._api_url}/api/v1/register",
+                json={
+                    "install_id": self._install_id,
+                    "app_version": self._app_version,
+                    "os": platform.system(),
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                self._api_key = data["api_token"]
+                self._save_api_key(data["api_token"])
+                # Update all dependents
+                for dep in self._dependents:
+                    if hasattr(dep, "set_server_key"):
+                        dep.set_server_key(self._api_key)
+                logger.info("Registered with server, got per-install token")
+                return True
+            else:
+                logger.warning("Registration failed: HTTP %d", resp.status_code)
+                return False
+        except requests.RequestException as exc:
+            logger.warning("Registration error: %s", exc)
+            return False
 
     # ─── Push: send local data to server ───────────────────────────────────
 
@@ -211,14 +273,42 @@ class ServerSync:
         except requests.RequestException:
             pass
 
-    @property
-    def install_id(self) -> str:
-        """Public access to install_id (for license activation)."""
-        return self._install_id
-
     def _headers(self) -> dict:
         """Build request headers."""
         h = {"Content-Type": "application/json", "User-Agent": f"Svoboda/{self._app_version}"}
         if self._api_key:
             h["X-API-Key"] = self._api_key
         return h
+
+    # ─── Install ID persistence ────────────────────────────────────────────
+
+    def _load_or_create_install_id(self) -> str:
+        """Load install_id from disk or generate a new one."""
+        id_path = self._base_dir / ".install_id"
+        if id_path.exists():
+            try:
+                return id_path.read_text(encoding="utf-8").strip()
+            except OSError:
+                pass
+        new_id = _generate_install_id()
+        try:
+            id_path.write_text(new_id, encoding="utf-8")
+        except OSError:
+            pass
+        return new_id
+
+    def _save_api_key(self, token: str) -> None:
+        """Save per-install API token to config.json."""
+        config_path = self._base_dir / "config.json"
+        if not config_path.exists():
+            return
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            data["server_api_key"] = token
+            data["install_id"] = self._install_id
+            config_path.write_text(
+                json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            logger.info("Saved API token to config.json")
+        except (json.JSONDecodeError, OSError) as exc:
+            logger.warning("Failed to save API token: %s", exc)

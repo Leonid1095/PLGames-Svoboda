@@ -1,39 +1,60 @@
-"""PLGames Svoboda — Backend API for analytics aggregation + tier licensing.
+"""PLGames Svoboda — Backend API for analytics aggregation + tier licensing + AI proxy.
 
 Deploy on VPS alongside 3x-ui. Receives anonymous telemetry,
 aggregates strategy effectiveness, serves recommended strategies,
-manages tier licenses via DonatePay.
+manages tier licenses via DonatePay, proxies AI requests (secrets never leave server).
 
 Run:
     pip install fastapi uvicorn requests
-    uvicorn server.api:app --host 0.0.0.0 --port 8443
+    uvicorn server.api:app --host 0.0.0.0 --port 8444
 """
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import requests as http_client
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Body
 from pydantic import BaseModel
 
 # ─── Config ────────────────────────────────────────────────────────────────────
 
 DB_PATH = Path(os.environ.get("SVOBODA_DB_PATH", str(Path(__file__).parent / "svoboda_server.db")))
 API_KEY = os.environ.get("SVOBODA_API_KEY", "CHANGE_ME_TO_RANDOM_SECRET")
+
+# Server-side only secrets — never sent to clients
+AI_API_URL = os.environ.get("AI_API_URL", "")
+AI_API_KEY = os.environ.get("AI_API_KEY", "")
+AI_MODEL = os.environ.get("AI_MODEL", "plgames-ai")
+DEEPSEEK_API_URL = os.environ.get("DEEPSEEK_API_URL", "https://api.deepseek.com/v1")
+DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
+DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DONATEPAY_API_KEY = os.environ.get("DONATEPAY_API_KEY", "")
 DONATEPAY_API_BASE = "https://donatepay.ru/api/v1"
+
+# Registration secret for deriving per-install tokens
+REGISTRATION_SECRET = os.environ.get("REGISTRATION_SECRET", API_KEY)
 
 # Tier thresholds (RUB)
 TIER_SUPPORTER_MIN = 300
 TIER_PRO_MIN = 600
 LICENSE_DAYS = 30
+
+# Rate limits per tier (seconds between AI calls)
+TIER_RATE_LIMITS = {
+    "free": 86400,       # 1x/day
+    "supporter": 7200,   # every 2h
+    "pro": 1800,         # every 30min
+}
 
 # ─── Schema ────────────────────────────────────────────────────────────────────
 
@@ -68,7 +89,8 @@ CREATE TABLE IF NOT EXISTS installs (
     os TEXT,
     app_version TEXT,
     isp TEXT DEFAULT 'unknown',
-    event_count INTEGER DEFAULT 0
+    event_count INTEGER DEFAULT 0,
+    api_token TEXT
 );
 
 CREATE TABLE IF NOT EXISTS licenses (
@@ -78,6 +100,12 @@ CREATE TABLE IF NOT EXISTS licenses (
     donation_amount REAL DEFAULT 0,
     issued_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS ai_rate_limits (
+    install_id TEXT PRIMARY KEY,
+    last_call TEXT NOT NULL,
+    call_count INTEGER DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_telemetry_install ON telemetry_events(install_id);
@@ -110,6 +138,19 @@ class ActivateLicenseRequest(BaseModel):
     donor_name: str  # DonatePay nickname
 
 
+class RegisterRequest(BaseModel):
+    install_id: str
+    app_version: str = "1.0.0"
+    os: str = "unknown"
+
+
+class AIChatRequest(BaseModel):
+    install_id: str
+    messages: list[dict]
+    temperature: float = 0.7
+    max_tokens: int = 1024
+
+
 # ─── DB helper ─────────────────────────────────────────────────────────────────
 
 def get_db() -> sqlite3.Connection:
@@ -134,16 +175,217 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Svoboda Analytics API",
-    description="Anonymous telemetry aggregation + tier licensing",
-    version="1.1.0",
+    description="Anonymous telemetry aggregation + tier licensing + AI proxy",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
 
+def _derive_token(install_id: str) -> str:
+    """Derive a deterministic per-install API token using HMAC."""
+    return hmac.new(
+        REGISTRATION_SECRET.encode(), install_id.encode(), hashlib.sha256
+    ).hexdigest()
+
+
 def _verify_api_key(x_api_key: Optional[str]) -> None:
-    if API_KEY and API_KEY != "CHANGE_ME_TO_RANDOM_SECRET":
-        if x_api_key != API_KEY:
-            raise HTTPException(status_code=403, detail="Invalid API key")
+    """Verify either the master API key or a per-install token."""
+    if not API_KEY or API_KEY == "CHANGE_ME_TO_RANDOM_SECRET":
+        return  # No auth configured
+    if x_api_key == API_KEY:
+        return  # Master key
+    # Check if it's a valid per-install token
+    if x_api_key:
+        conn = get_db()
+        try:
+            cur = conn.execute(
+                "SELECT install_id FROM installs WHERE api_token = ?", (x_api_key,)
+            )
+            if cur.fetchone():
+                return
+        finally:
+            conn.close()
+    raise HTTPException(status_code=403, detail="Invalid API key")
+
+
+def _get_install_tier(conn: sqlite3.Connection, install_id: str) -> str:
+    """Get the tier for an install_id."""
+    cur = conn.execute(
+        "SELECT tier, expires_at FROM licenses WHERE install_id = ?", (install_id,)
+    )
+    row = cur.fetchone()
+    if not row:
+        return "free"
+    tier, expires_at = row
+    try:
+        expires = datetime.fromisoformat(expires_at)
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if datetime.now(timezone.utc) >= expires:
+            return "free"
+    except (ValueError, TypeError):
+        return "free"
+    return tier
+
+
+# ─── Registration ──────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/register")
+async def register_install(req: RegisterRequest):
+    """Register a new install and return a per-install API token."""
+    token = _derive_token(req.install_id)
+    now = datetime.now(timezone.utc).isoformat()
+
+    conn = get_db()
+    try:
+        conn.execute(
+            """INSERT INTO installs (install_id, first_seen, last_seen, os, app_version, event_count, api_token)
+               VALUES (?, ?, ?, ?, ?, 0, ?)
+               ON CONFLICT(install_id) DO UPDATE SET
+                 last_seen = excluded.last_seen, os = excluded.os,
+                 app_version = excluded.app_version, api_token = excluded.api_token""",
+            (req.install_id, now, now, req.os, req.app_version, token),
+        )
+        conn.commit()
+        return {
+            "status": "ok",
+            "api_token": token,
+            "install_id": req.install_id,
+        }
+    finally:
+        conn.close()
+
+
+# ─── AI Proxy ──────────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/ai/chat")
+async def ai_chat_proxy(
+    req: AIChatRequest,
+    x_api_key: Optional[str] = Header(None),
+):
+    """Proxy AI chat requests. AI URL/keys never leave the server."""
+    _verify_api_key(x_api_key)
+
+    conn = get_db()
+    try:
+        # Check tier and rate limit
+        tier = _get_install_tier(conn, req.install_id)
+        rate_limit = TIER_RATE_LIMITS.get(tier, 86400)
+
+        cur = conn.execute(
+            "SELECT last_call FROM ai_rate_limits WHERE install_id = ?",
+            (req.install_id,),
+        )
+        row = cur.fetchone()
+        if row:
+            last_call = datetime.fromisoformat(row[0])
+            if last_call.tzinfo is None:
+                last_call = last_call.replace(tzinfo=timezone.utc)
+            elapsed = (datetime.now(timezone.utc) - last_call).total_seconds()
+            if elapsed < rate_limit:
+                remaining = int(rate_limit - elapsed)
+                raise HTTPException(
+                    status_code=429,
+                    detail=f"Rate limit: retry in {remaining}s. Tier: {tier}",
+                )
+
+        # Decide which AI backend to use
+        if tier == "pro" and DEEPSEEK_API_KEY:
+            api_url = DEEPSEEK_API_URL
+            api_key = DEEPSEEK_API_KEY
+            model = DEEPSEEK_MODEL
+        elif AI_API_URL and AI_API_KEY:
+            api_url = AI_API_URL
+            api_key = AI_API_KEY
+            model = AI_MODEL
+        else:
+            raise HTTPException(status_code=503, detail="AI not configured on server")
+
+        # Forward to AI
+        resp = http_client.post(
+            f"{api_url}/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": model,
+                "messages": req.messages,
+                "temperature": req.temperature,
+                "max_tokens": req.max_tokens,
+            },
+            timeout=45,
+        )
+
+        if resp.status_code != 200:
+            raise HTTPException(
+                status_code=502, detail=f"AI backend error: HTTP {resp.status_code}"
+            )
+
+        # Update rate limit
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            """INSERT INTO ai_rate_limits (install_id, last_call, call_count)
+               VALUES (?, ?, 1)
+               ON CONFLICT(install_id) DO UPDATE SET
+                 last_call = excluded.last_call,
+                 call_count = call_count + 1""",
+            (req.install_id, now),
+        )
+        conn.commit()
+
+        # Return AI response
+        data = resp.json()
+        return {
+            "content": data["choices"][0]["message"]["content"],
+            "model": model,
+            "tier": tier,
+        }
+
+    finally:
+        conn.close()
+
+
+# ─── Donate Proxy ──────────────────────────────────────────────────────────────
+
+@app.get("/api/v1/donate/recent")
+async def get_recent_donations(
+    x_api_key: Optional[str] = Header(None),
+    limit: int = Query(10, le=50),
+):
+    """Proxy DonatePay API. DonatePay key never leaves the server."""
+    _verify_api_key(x_api_key)
+
+    if not DONATEPAY_API_KEY:
+        return {"donations": [], "page_url": ""}
+
+    try:
+        resp = http_client.get(
+            f"{DONATEPAY_API_BASE}/transactions",
+            params={
+                "access_token": DONATEPAY_API_KEY,
+                "limit": limit,
+                "type": "donation",
+                "status": "success",
+            },
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            donations = [
+                {
+                    "name": d.get("what", "Anonymous"),
+                    "amount": d.get("sum", 0),
+                    "currency": d.get("currency", "RUB"),
+                    "message": d.get("comment", ""),
+                    "date": d.get("created_at", ""),
+                }
+                for d in data.get("data", [])
+            ]
+            return {"donations": donations}
+        return {"donations": []}
+    except Exception:
+        return {"donations": []}
 
 
 # ─── Telemetry ─────────────────────────────────────────────────────────────────

@@ -162,16 +162,34 @@ def main():
     manager = StrategyManager(config)
     tester = ConnectionTester(config, mock=True)
     tier = TierManager(config)
-    ai = AIAdvisor(config, analytics, tier_manager=tier)
     donate = DonateManager(config)
     sync = ServerSync(config, analytics)
     sync.set_tier_manager(tier)
+
+    # AI advisor — uses server proxy, no direct AI access
+    ai = AIAdvisor(config, analytics, tier_manager=tier)
+    ai.set_install_id(sync.install_id)
+
+    # Register dependents for server key updates
+    sync.register_dependent(ai)
+    sync.register_dependent(donate)
+
+    # Auto-register with server
+    if sync.is_configured:
+        print("  Registering with server...")
+        if sync.register_if_needed():
+            print(f"  [OK] Registered (install: {sync.install_id[:8]}...)")
+            # Update AI with the obtained key
+            ai.set_server_key(sync.api_key)
+        else:
+            print("  [!] Registration failed (will retry on sync)")
+
     ga_config = GAConfig.from_config(config)
 
     # Status
     print(f"  Analytics DB:  {config.get('analytics_db_path')}")
     print(f"  Tier:          {tier.get_status_line()}")
-    print(f"  AI advisor:    {'ACTIVE' if ai.is_available else 'disabled'} ({ai.active_model})")
+    print(f"  AI advisor:    {'ACTIVE' if ai.is_available else 'disabled'} (via server proxy)")
     print(f"  Server sync:   {'ACTIVE' if sync.is_configured else 'disabled'}")
     print(f"  Donate page:   {donate.page_url}")
     print(f"  Cycle every:   {cycle_minutes} min")

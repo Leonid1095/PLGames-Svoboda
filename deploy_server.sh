@@ -19,7 +19,7 @@ set -euo pipefail
 APP_DIR="/opt/svoboda-api"
 APP_USER="svoboda"
 SERVICE_NAME="svoboda-api"
-API_PORT=8443
+API_PORT=8444
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -149,11 +149,59 @@ else
     log_ok "DonatePay key exists"
 fi
 
-# Environment file
+# AI API keys (server-side only — never sent to clients)
+AI_KEY_FILE="$APP_DIR/.ai_key"
+if [ ! -f "$AI_KEY_FILE" ]; then
+    echo ""
+    echo -e "  ${YELLOW}Enter your PLGames AI API URL (or press Enter to skip):${NC}"
+    read -r AI_URL_INPUT
+    echo -e "  ${YELLOW}Enter your PLGames AI API key (or press Enter to skip):${NC}"
+    read -r AI_KEY_INPUT
+    if [ -n "$AI_URL_INPUT" ] && [ -n "$AI_KEY_INPUT" ]; then
+        echo "$AI_URL_INPUT" > "$AI_KEY_FILE"
+        echo "$AI_KEY_INPUT" >> "$AI_KEY_FILE"
+        chmod 600 "$AI_KEY_FILE"
+        log_ok "AI API keys saved"
+    else
+        log_warn "AI API skipped (AI proxy won't work until configured)"
+    fi
+else
+    log_ok "AI API keys exist"
+fi
+
+# Read AI config
+AI_URL=$(head -1 "$AI_KEY_FILE" 2>/dev/null || echo "")
+AI_KEY=$(tail -1 "$AI_KEY_FILE" 2>/dev/null || echo "")
+
+# DeepSeek key (for PRO tier)
+DEEPSEEK_KEY_FILE="$APP_DIR/.deepseek_key"
+if [ ! -f "$DEEPSEEK_KEY_FILE" ]; then
+    echo ""
+    echo -e "  ${YELLOW}Enter your DeepSeek API key (or press Enter to skip):${NC}"
+    read -r DEEPSEEK_KEY_INPUT
+    if [ -n "$DEEPSEEK_KEY_INPUT" ]; then
+        echo "$DEEPSEEK_KEY_INPUT" > "$DEEPSEEK_KEY_FILE"
+        chmod 600 "$DEEPSEEK_KEY_FILE"
+        log_ok "DeepSeek key saved"
+    else
+        log_warn "DeepSeek skipped (PRO tier AI won't work until configured)"
+    fi
+else
+    log_ok "DeepSeek key exists"
+fi
+
+# Environment file (ALL secrets stay here — never in code)
 cat > "$APP_DIR/.env" << EOF
 SVOBODA_API_KEY=$API_KEY
 SVOBODA_DB_PATH=$APP_DIR/data/svoboda_server.db
 DONATEPAY_API_KEY=$(cat "$DONATE_KEY_FILE" 2>/dev/null || echo "")
+AI_API_URL=$AI_URL
+AI_API_KEY=$AI_KEY
+AI_MODEL=plgames-ai
+DEEPSEEK_API_URL=https://api.deepseek.com/v1
+DEEPSEEK_API_KEY=$(cat "$DEEPSEEK_KEY_FILE" 2>/dev/null || echo "")
+DEEPSEEK_MODEL=deepseek-chat
+REGISTRATION_SECRET=$API_KEY
 EOF
 chmod 600 "$APP_DIR/.env"
 

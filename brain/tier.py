@@ -5,6 +5,8 @@ Tiers:
   SUPPORTER: plgames-ai, 12 scans/day (every 2h), auto-test
   PRO:       DeepSeek V3 (paid API), 48 scans/day (every 30min), auto-test
 
+AI model routing is handled server-side. The client only knows tier name.
+
 License flow:
   1. User donates on DonatePay
   2. User enters their DonatePay nickname in the app
@@ -24,12 +26,12 @@ from typing import Optional
 
 logger = logging.getLogger("svoboda.tier")
 
-# ─── Tier definitions ───────────────────────────────────────────────────────
+# ─── Tier definitions (display-only on client) ─────────────────────────────
 
 TIERS = {
     "free": {
         "name": "Free",
-        "ai_model": "plgames-ai",
+        "ai_model_display": "plgames-ai",
         "ai_interval_seconds": 86400,       # 24 hours
         "ai_auto_test": False,
         "priority_strategies": False,
@@ -37,7 +39,7 @@ TIERS = {
     "supporter": {
         "name": "Supporter",
         "min_donation": 300,
-        "ai_model": "plgames-ai",
+        "ai_model_display": "plgames-ai",
         "ai_interval_seconds": 7200,         # 2 hours
         "ai_auto_test": True,
         "priority_strategies": True,
@@ -45,8 +47,7 @@ TIERS = {
     "pro": {
         "name": "Pro",
         "min_donation": 600,
-        "ai_model": "deepseek-chat",         # DeepSeek V3
-        "ai_api_url": "https://api.deepseek.com/v1",
+        "ai_model_display": "DeepSeek V3",
         "ai_interval_seconds": 1800,         # 30 minutes
         "ai_auto_test": True,
         "priority_strategies": True,
@@ -85,20 +86,8 @@ class TierManager:
 
     @property
     def ai_model(self) -> str:
-        """AI model for current tier."""
-        return self.tier_config["ai_model"]
-
-    @property
-    def ai_api_url(self) -> Optional[str]:
-        """AI API URL override for current tier (None = use default)."""
-        return self.tier_config.get("ai_api_url")
-
-    @property
-    def ai_api_key(self) -> Optional[str]:
-        """AI API key for current tier."""
-        if self.tier == "pro":
-            return self._config.get("deepseek_api_key", "")
-        return self._config.get("ai_api_key", "")
+        """AI model display name for current tier."""
+        return self.tier_config["ai_model_display"]
 
     @property
     def ai_interval(self) -> int:
@@ -138,12 +127,12 @@ class TierManager:
         t = self.tier
         cfg = self.tier_config
         if t == "free":
-            return f"[FREE] AI: {cfg['ai_model']} (1x/day)"
+            return f"[FREE] AI: {cfg['ai_model_display']} (1x/day)"
         elif t == "supporter":
-            return f"[SUPPORTER] AI: {cfg['ai_model']} (every 2h) + auto-test"
+            return f"[SUPPORTER] AI: {cfg['ai_model_display']} (every 2h) + auto-test"
         elif t == "pro":
             until = self._license.get("until", "?") if self._license else "?"
-            return f"[PRO] AI: DeepSeek V3 (every 30min) + auto-test | until {until}"
+            return f"[PRO] AI: {cfg['ai_model_display']} (every 30min) + auto-test | until {until}"
         return f"[{t.upper()}]"
 
     # ─── Internal ──────────────────────────────────────────────────────────

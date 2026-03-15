@@ -8,8 +8,8 @@ echo  ====================================================
 echo   PLGames Svoboda Brain - Shadow Mode
 echo  ====================================================
 echo.
-echo  Окно остается открытым. Данные собираются непрерывно.
-echo  Для остановки: Ctrl+C
+echo  Okno ostaetsya otkrytym. Dannye sobirayutsya nepreryvno.
+echo  Dlya ostanovki: Ctrl+C
 echo.
 
 :: Check Python
@@ -42,17 +42,14 @@ if %errorLevel% neq 0 (
     echo  [OK] Dependencies OK
 )
 
-:: Check config.json exists
+:: Auto-create config.json from template (no manual editing needed)
 if not exist "config.json" (
     if exist "config.example.json" (
         echo  [INFO] Creating config.json from template...
         copy config.example.json config.json >nul
-        echo  [WARN] Edit config.json with your API keys!
-        notepad config.json
-        pause
-        exit /b 0
+        echo  [OK] Config created. App will auto-register with server.
     ) else (
-        echo  [ERROR] config.json not found!
+        echo  [ERROR] config.example.json not found!
         pause
         exit /b 1
     )

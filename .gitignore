@@ -26,5 +26,8 @@ bin/
 .api_key
 .env
 .donatepay_key
+.ai_key
+.deepseek_key
+.install_id
 .claude/
 svoboda.log*

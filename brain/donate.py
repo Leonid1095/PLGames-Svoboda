@@ -1,7 +1,7 @@
 """Donate — DonatePay integration for user support.
 
-Provides donation page URL and optionally checks recent donations
-via DonatePay API for in-app thank-you messages.
+Provides donation page URL. Recent donations are fetched through server proxy
+(DonatePay API key never leaves the server).
 """
 
 from __future__ import annotations
@@ -15,12 +15,12 @@ logger = logging.getLogger("svoboda.donate")
 
 
 class DonateManager:
-    """DonatePay donation integration."""
+    """DonatePay donation integration via server proxy."""
 
     def __init__(self, config: dict):
-        self._api_key: str = config.get("donatepay_api_key", "")
         self._page_url: str = config.get("donatepay_page_url", "")
-        self._api_base: str = config.get("donatepay_api_base_url", "https://donatepay.ru/api/v1")
+        self._server_url: str = config.get("server_api_url", "")
+        self._server_key: str = config.get("server_api_key", "")
 
     @property
     def page_url(self) -> str:
@@ -29,44 +29,34 @@ class DonateManager:
 
     @property
     def is_configured(self) -> bool:
-        """Check if DonatePay API is configured."""
-        return bool(self._api_key) and bool(self._page_url)
+        """Check if donate page is set."""
+        return bool(self._page_url)
+
+    def set_server_key(self, key: str) -> None:
+        """Update server API key (after auto-registration)."""
+        self._server_key = key
 
     def get_recent_donations(self, limit: int = 10) -> list[dict]:
-        """Fetch recent donations from DonatePay API."""
-        if not self._api_key:
+        """Fetch recent donations through server proxy."""
+        if not self._server_url:
             return []
 
         try:
             resp = requests.get(
-                f"{self._api_base}/transactions",
-                params={
-                    "access_token": self._api_key,
-                    "limit": limit,
-                    "type": "donation",
-                    "status": "success",
-                },
+                f"{self._server_url}/api/v1/donate/recent",
+                params={"limit": limit},
+                headers={"X-API-Key": self._server_key},
                 timeout=10,
             )
 
             if resp.status_code == 200:
                 data = resp.json()
-                donations = data.get("data", [])
-                return [
-                    {
-                        "name": d.get("what", "Anonymous"),
-                        "amount": d.get("sum", 0),
-                        "currency": d.get("currency", "RUB"),
-                        "message": d.get("comment", ""),
-                        "date": d.get("created_at", ""),
-                    }
-                    for d in donations
-                ]
+                return data.get("donations", [])
             else:
-                logger.debug("DonatePay API error: HTTP %d", resp.status_code)
+                logger.debug("Donate proxy error: HTTP %d", resp.status_code)
 
         except requests.RequestException as exc:
-            logger.debug("DonatePay API error: %s", exc)
+            logger.debug("Donate proxy error: %s", exc)
 
         return []
 
@@ -76,7 +66,7 @@ class DonateManager:
         if not donations:
             return None
 
-        total = sum(d["amount"] for d in donations)
+        total = sum(d.get("amount", 0) for d in donations)
         return {
             "total_amount": total,
             "donation_count": len(donations),
