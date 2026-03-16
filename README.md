@@ -1,136 +1,182 @@
-# PLGames Svoboda
+<div align="center">
 
-**AI-powered DPI bypass tool** that automatically finds and applies the best bypass strategy for your ISP. Inspired by [Geneva](https://geneva.cs.umd.edu/) genetic algorithm + [zapret2](https://github.com/bol-van/zapret2) packet manipulation engine.
+# 🛡️ PLGames Svoboda
 
-> YouTube, Twitch, Twitter and other blocked sites — working in seconds, not minutes.
+### AI-Powered Internet Freedom Tool
 
-## How It Works
+**Your internet — your rules. Powered by genetic algorithm + artificial intelligence.**
+
+[🇷🇺 Русский](#-русский) • [🇬🇧 English](#-english) • [⬇️ Download](#-quick-start) • [💰 Support](#-support-the-project)
+
+---
+
+<img src="https://img.shields.io/badge/Platform-Windows-blue?style=for-the-badge&logo=windows" alt="Windows">
+<img src="https://img.shields.io/badge/Engine-zapret2-green?style=for-the-badge" alt="zapret2">
+<img src="https://img.shields.io/badge/AI-Powered-purple?style=for-the-badge&logo=openai" alt="AI">
+<img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT">
+
+</div>
+
+---
+
+## 🇷🇺 Русский
+
+### Что это?
+
+PLGames Svoboda — инструмент который **автоматически** находит способ обойти блокировки интернета. Не нужно ничего настраивать — запустил и работает.
+
+### Чем отличается от аналогов?
+
+| | Svoboda | GoodbyeDPI | Zapret GUI | ByeDPI |
+|---|:---:|:---:|:---:|:---:|
+| AI анализ блокировок | ✅ | ❌ | ❌ | ❌ |
+| Автоподбор стратегии | ✅ | ❌ | ❌ | ❌ |
+| Коллективный интеллект | ✅ | ❌ | ❌ | ❌ |
+| Определение типа DPI | ✅ | ❌ | ❌ | ❌ |
+| Автообновление | ✅ | ❌ | ❌ | ❌ |
+| 80 000+ доменов | ✅ | ❌ | ❌ | ❌ |
+
+### Как работает?
 
 ```
-Run bat file → ISP detected → DPI profiled → Strategy found → Sites unblocked
-                                                    ↑
-                                    Community data + AI + Genetic Algorithm
+Запустил → AI определил провайдера и тип блокировки →
+Получил рабочую стратегию от сообщества → Применил за 5 секунд →
+Мониторит 24/7 → Если блокировка изменилась — адаптируется автоматически
 ```
 
-1. **TSPU Profiler** — fingerprints your ISP's DPI: hop distance, block type, behavior
-2. **Block Classifier** — determines HOW each site is blocked (RST injection, SNI filtering, throttling)
-3. **Community Intelligence** — tries strategies proven by other users on your ISP (5 sec)
-4. **Fast Enumeration** — tests 19 known strategies in priority order (40 sec)
-5. **Genetic Algorithm** — evolves new strategies if nothing else works (5-10 min)
-6. **Watchdog** — monitors 24/7, re-evolves if DPI changes
+**Под капотом:**
+- 🧬 **Генетический алгоритм** — эволюционирует стратегии обхода как Geneva
+- 🤖 **AI анализатор** — определяет тип DPI и подбирает метод (не угадывает, а анализирует пакеты)
+- 👥 **Коллективный интеллект** — стратегии от тысяч пользователей на вашем провайдере
+- 🔄 **Автоадаптация** — ТСПУ обновился? Svoboda найдёт новый обход автоматически
+- 📋 **81 000+ доменов** — список блокировок обновляется при каждом запуске
 
-## Quick Start (Windows)
+### Что разблокирует?
 
-```batch
+YouTube • Discord • Twitter/X • Twitch • Instagram • Facebook • LinkedIn • и всё остальное из реестра
+
+### ⬇️ Быстрый старт
+
+```
 git clone https://github.com/Leonid1095/PLGames-Svoboda.git
 cd PLGames-Svoboda
 run.bat
 ```
 
-That's it. Run as Administrator (required for WinDivert driver). zapret2 downloads automatically.
+**Требования:** Windows 10+, Python 3.10+, права администратора
+
+### 🔒 Приватность
+
+- Никаких личных данных — ни IP, ни MAC, ни имени компьютера
+- Анонимная телеметрия — только тип провайдера и результат стратегии
+- Всё шифрование на стороне сервера — в коде нет ключей API
+- Телеметрия помогает AI учиться и улучшать обход для всех пользователей
+- Можно отключить в config.json (`"telemetry_consent": false`)
+
+---
+
+## 🇬🇧 English
+
+### What is this?
+
+PLGames Svoboda is a tool that **automatically** finds ways to bypass internet censorship. No configuration needed — just run and it works.
+
+### How is it different?
+
+Most tools give you a static set of bypass rules. Svoboda uses **AI + genetic algorithm** to find what works for YOUR specific ISP and adapt when censorship changes.
+
+- 🧬 **Genetic Algorithm** — evolves bypass strategies like [Geneva](https://geneva.cs.umd.edu/)
+- 🤖 **AI Analyzer** — profiles your DPI middlebox (hop distance, type, behavior)
+- 👥 **Collective Intelligence** — strategies from community, voted by real users
+- 🔄 **Auto-adaptation** — DPI firmware updated? Svoboda re-evolves automatically
+- 📋 **81,000+ domains** — blocklist updated every launch
+
+### Quick Start
+
+```
+git clone https://github.com/Leonid1095/PLGames-Svoboda.git
+cd PLGames-Svoboda
+run.bat
+```
 
 **Requirements:** Windows 10+, Python 3.10+, Administrator rights
 
-## What Gets Unblocked
-
-| Site | Status | Method |
-|------|--------|--------|
-| YouTube (video + shorts) | Working | multisplit + multidisorder |
-| Twitch (streams) | Working | hostlist-protected |
-| Twitter / X | Working | same strategy |
-| Discord (web) | Working | incognito mode* |
-| Discord (app) | In progress | Electron/Schannel conflict |
-
-*Discord web works in incognito. Regular mode may conflict with browser extensions (Kaspersky, Perplexity AI).
-
-## Architecture
+### How It Works
 
 ```
-run.bat
-  ├── run_real.py          Console mode (full output)
-  └── svoboda_tray.py      Background mode (system tray icon)
-
-brain/
-  ├── block_classifier.py  Classifies block type per host
-  ├── tspu_profiler.py     Fingerprints DPI middlebox
-  ├── enumerator.py        Fast strategy enumeration (blockcheck2-style)
-  ├── genetic.py           Genetic algorithm for strategy evolution
-  ├── tester.py            Real connection testing with winws2
-  ├── ai_advisor.py        AI strategy suggestions (server proxy)
-  ├── failure_analyzer.py  Structured failure analysis
-  ├── analytics.py         Local SQLite telemetry
-  ├── manager.py           Strategy persistence + migration
-  ├── sync.py              Anonymous server sync + community voting
-  ├── profiler.py          ISP detection (ASN, seed strategies)
-  ├── ui.py                Colored terminal output
-  ├── tier.py              FREE / SUPPORTER / PRO tiers
-  └── donate.py            DonatePay integration
-
-server/
-  └── api.py               FastAPI backend (AI proxy, telemetry, tiers)
-
-fix_internet.bat           Emergency: kill winws2 + reset network
+Launch → AI detects ISP + DPI type → Community strategy (5 sec) →
+Fast enumeration (40 sec) → Genetic evolution (if needed) →
+Apply + Monitor 24/7 → Re-evolve on degradation
 ```
 
-## How DPI Bypass Works
+### Privacy
 
-PLGames Svoboda uses [zapret2](https://github.com/bol-van/zapret2) `winws2.exe` to manipulate TCP packets at the kernel level via WinDivert:
+- Zero personal data collected (no IP, MAC, hostname)
+- Anonymous telemetry: ISP type + strategy results only
+- Telemetry trains the AI to improve bypass for everyone
+- Opt-out: set `"telemetry_consent": false` in config.json
 
-- **multisplit** — splits TLS ClientHello into multiple segments so DPI can't read SNI
-- **multidisorder** — sends segments out of order, confusing DPI reassembly
-- **fake** — sends a decoy packet with wrong SNI and short TTL (reaches DPI but not server)
-- **seqovl** — overlaps TCP sequences with fake data
+---
 
-Strategies are applied **only to blocked domains** (81K+ from Russian blocklist) via `--hostlist`. Your regular traffic is untouched.
+## 🗺️ Roadmap
 
-## Tier System
+### ✅ Done
+- AI block classifier (RST, SNI, HTTP/2-kill, throttling, IP block)
+- TSPU profiler (DPI distance, type, recommended TTL)
+- Genetic algorithm with AI feedback (auto-excludes dead strategies)
+- Community intelligence (instant strategies, voting, TSPU change detection)
+- Fast enumeration — 19 proven strategies in priority order
+- Circular orchestrator — auto-failover between strategies
+- 4-profile winws2 (TLS, YouTube CDN, HTTP, QUIC)
+- System tray mode + Windows notifications
+- 81K domain blocklist + auto-detection of new blocks
 
-| Feature | Free | Supporter (300 RUB) | Pro (600 RUB) |
-|---------|------|---------------------|---------------|
-| DPI bypass | Yes | Yes | Yes |
-| AI analysis | 1x/day | Every 2h | Every 30min |
-| AI model | Standard | Standard | DeepSeek V3 |
-| Community strategies | Yes | Yes | Yes |
-| PLGames DNS (DoH) | - | - | Yes |
+### 🔜 Next
+- **ByeDPI mode** — works without admin rights (SOCKS proxy)
+- **Traffic Morphing** — AI mimics real browser patterns (anti-ML censorship)
+- **PLGames DNS** — encrypted DNS bypass (DoH, Germany)
+- **Linux + Android** — multi-platform support
+- **Telegram bot** — manage remotely
 
-Support the project: [DonatePay](https://new.donatepay.ru/@lenya)
+### 🔮 Future
+- AI vs AI: real-time adaptation against ML-powered censorship (2026+)
+- Huma-style HTTP/2 tunneling
+- Community dashboard with live bypass map
 
-## Privacy & Security
+---
 
-- **Zero secrets in client code** — all API keys stay server-side
-- **Anonymous telemetry** — no IP, MAC, hostname, or accounts collected
-- **Per-install tokens** — auto-generated HMAC, individually revocable
-- **Hostlist filtering** — only blocked domains processed, rest untouched
-- **Open source** — audit everything
+## 💰 Support the Project
 
-## Self-Hosting
+| Tier | Price | What you get |
+|------|-------|-------------|
+| **Free** | 0 | Full bypass + AI 1x/day |
+| **Supporter** | 300 RUB | AI every 2h + priority strategies |
+| **Pro** | 600 RUB | DeepSeek V3 AI + PLGames DNS |
 
-```bash
-git clone https://github.com/Leonid1095/PLGames-Svoboda.git
-cd PLGames-Svoboda
-sudo bash deploy_server.sh
+**[→ Donate on DonatePay](https://new.donatepay.ru/@lenya)**
+
+Your donation keeps the servers running and the AI learning.
+
+---
+
+## ⚠️ Internet Broken?
+
+If winws2 crashed and your internet stopped:
+
 ```
-
-Sets up FastAPI + nginx + systemd on your VPS.
-
-## Emergency: Internet Broken?
-
-If winws2 crashed and your internet stopped working:
-
-```batch
 fix_internet.bat
 ```
 
-This kills winws2, unloads WinDivert driver, flushes DNS, and resets Winsock.
+Kills winws2, unloads WinDivert, flushes DNS, resets network stack.
 
-## Contributing
+---
 
-Pull requests welcome. Key areas:
-- New bypass strategies for specific ISPs
-- TSPU fingerprinting improvements
-- Traffic morphing (anti-ML detection)
-- ByeDPI-style SOCKS proxy fallback (no admin needed)
+## 📄 License
 
-## License
+MIT — use freely, contribute back.
 
-MIT
+<div align="center">
+
+**Made with 🧬 by PLGames**
+
+</div>
