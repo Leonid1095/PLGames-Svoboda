@@ -32,7 +32,7 @@
   "sync_enabled": true,
   "telemetry_consent": true,
   "sync_interval_minutes": 30,
-  "app_version": "1.0.0",
+  "app_version": "0.3.0-beta",
   "ai_enabled": true,
   "donatepay_page_url": "https://new.donatepay.ru/@lenya",
   "shadow_cycle_minutes": 10

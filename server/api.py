@@ -176,7 +176,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Svoboda Analytics API",
     description="Anonymous telemetry aggregation + tier licensing + AI proxy",
-    version="2.0.0",
+    version="0.3.0-beta",
     lifespan=lifespan,
 )
 
