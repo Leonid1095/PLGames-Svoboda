@@ -95,6 +95,7 @@ from brain.tier import TierManager
 
 _running = True
 _active_process: Optional[subprocess.Popen] = None
+_tspu_recommended_ttl: int = 0  # set by TSPU profiler, used by permanent winws2
 
 
 def _signal_handler(signum, frame):
@@ -199,7 +200,7 @@ def _download_hostlist(base_dir: Path) -> Optional[Path]:
 
 def _start_permanent_zapret(
     binary: Path, lua_dir: Optional[Path], flags: list[str],
-    hostlist: Optional[Path] = None,
+    hostlist: Optional[Path] = None, tspu_ttl: int = 0,
 ) -> Optional[subprocess.Popen]:
     """Start winws2/nfqws2 permanently with the given strategy.
 
@@ -246,27 +247,28 @@ def _start_permanent_zapret(
         except Exception as exc:
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
-    # ── Identical to tester: same filters, same strategy ─────────
-    # IMPORTANT: permanent must match what tester tested, otherwise
-    # tested strategy won't work in permanent mode
+    # ── TCP: TLS + HTTP desync ───────────────────────────────────
+    # No --payload filter: process ALL outgoing data packets, not just ClientHello.
+    # This is critical for HTTP/2 streams (YouTube video, Discord WebSocket).
+    # --out-range controls how many packets are processed (not --payload).
     cmd.extend([
         "--filter-tcp=80,443",
         "--filter-l7=tls,http",
-        "--payload=tls_client_hello,http_req",
     ])
 
-    # User-evolved/enumerated strategy (exactly as tested)
+    # User-evolved/enumerated strategy
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # ── QUIC: drop to force TCP fallback ─────────────────────────
-    # fake doesn't work on this ISP, so block QUIC entirely.
-    # Browser will fall back to TCP where our multisplit works.
+    # ── QUIC: fake with known TTL ────────────────────────────────
+    # QUIC needs fake packets. Use fixed TTL from TSPU profiler
+    # (autottl doesn't work without --wf-tcp-in for UDP).
+    quic_ttl = tspu_ttl if tspu_ttl and tspu_ttl > 0 else 4
     cmd.extend([
         "--new",
         "--filter-udp=443", "--filter-l7=quic",
         "--payload=quic_initial",
-        "--lua-desync=drop",
+        f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=11",
     ])
 
     log = logging.getLogger("svoboda")
@@ -460,6 +462,7 @@ def main():
         tspu = TSPUProfiler(timeout=5)
         tspu_profile = tspu.profile("youtube.com", isp=isp_name, asn=asn if 'asn' in dir() else "")
         if tspu_profile.dpi_hop_distance:
+            _tspu_recommended_ttl = tspu_profile.recommended_ttl or 0
             ui.tspu_info(
                 tspu_profile.dpi_hop_distance, tspu_profile.dpi_type,
                 tspu_profile.recommended_ttl, tspu_profile.evidence,
@@ -516,7 +519,7 @@ def main():
                 sync.vote_strategy(community["flags"], success=True, fitness=verified, isp=isp_name, dpi_type=dpi_type)
                 # Apply directly — skip everything
                 record = manager.save_strategy(community["flags"], verified, isp_name)
-                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist)
+                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist, _tspu_recommended_ttl)
                 if _active_process:
                     print(f"\n  === DPI BYPASS ACTIVE (community strategy) ===\n")
                     # TODO: go to watchdog
@@ -543,7 +546,7 @@ def main():
 
             print(f"\n  Applying cached strategy (fitness={best_fitness:.3f})...")
             print(f"  Strategy: {' | '.join(best_flags)}")
-            _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist)
+            _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl)
 
             if _active_process:
                 time.sleep(2)
@@ -652,7 +655,7 @@ def main():
             isp=isp_name, source="enumeration",
         )
 
-        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist)
+        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl)
         if _active_process:
             time.sleep(2)
             verify = _quick_connectivity_check(hosts)
@@ -780,7 +783,7 @@ def main():
     print(f"  Applying strategy (fitness={best.fitness:.3f})...")
     print(f"  Strategy: {' | '.join(best.flags)}")
 
-    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist)
+    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
 
     if _active_process is None:
         print("  [ERROR] Failed to start DPI bypass!")
@@ -885,7 +888,7 @@ def main():
             if best and best.fitness > 0.1:
                 record = manager.save_strategy(best.flags, best.fitness, isp_name)
                 active_strategy_id = record.id
-                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist)
+                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
                 if _active_process:
                     print(f"  [OK] New strategy applied (fitness={best.fitness:.3f})")
                 else:
@@ -963,7 +966,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
 
                 if best and best.fitness > 0.1:
                     manager.save_strategy(best.flags, best.fitness, isp_name)
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist)
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
                     if _active_process:
                         print(f"\n  === DPI BYPASS ACTIVE (fitness={best.fitness:.3f}) ===\n")
 

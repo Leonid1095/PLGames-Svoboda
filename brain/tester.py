@@ -384,11 +384,11 @@ class ConnectionTester:
             except Exception:
                 pass
 
-        # TLS filters
+        # TLS filters (no --payload: process ALL packets, not just ClientHello)
+        # This matches permanent mode and is critical for HTTP/2 streams
         cmd.extend([
             "--filter-tcp=80,443",
             "--filter-l7=tls,http",
-            "--payload=tls_client_hello,http_req",
         ])
 
         # Add strategy lua-desync calls
