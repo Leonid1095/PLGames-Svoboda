@@ -259,12 +259,14 @@ def _start_permanent_zapret(
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # ── QUIC support (separate profile) ──────────────────────────
+    # ── QUIC: drop to force TCP fallback ─────────────────────────
+    # fake doesn't work on this ISP, so block QUIC entirely.
+    # Browser will fall back to TCP where our multisplit works.
     cmd.extend([
         "--new",
         "--filter-udp=443", "--filter-l7=quic",
         "--payload=quic_initial",
-        "--lua-desync=fake:blob=fake_default_quic:repeats=6",
+        "--lua-desync=drop",
     ])
 
     log = logging.getLogger("svoboda")
