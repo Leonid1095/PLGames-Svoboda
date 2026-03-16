@@ -216,6 +216,9 @@ def _start_permanent_zapret(
         cmd.extend([
             "--wf-tcp-out=80,443",
             "--wf-udp-out=443",
+            # NOTE: --wf-tcp-in NOT needed! SYN-ACK/FIN/RST are captured
+            # automatically by WinDivert filter constructor. This enables
+            # autottl calibration without the CPU cost of capturing all data.
         ])
     else:
         cmd.extend(["--qnum=200"])
@@ -247,26 +250,52 @@ def _start_permanent_zapret(
         except Exception as exc:
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
-    # ── TCP: TLS + HTTP desync ───────────────────────────────────
-    # No --payload filter: process ALL outgoing data packets, not just ClientHello.
-    # This is critical for HTTP/2 streams (YouTube video, Discord WebSocket).
-    # --out-range controls how many packets are processed (not --payload).
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 1: TLS (all HTTPS except YouTube CDN)
+    # YouTube CDN (googlevideo) breaks with multisplit → exclude it
+    # ══════════════════════════════════════════════════════════════
     cmd.extend([
-        "--filter-tcp=80,443",
-        "--filter-l7=tls,http",
+        "--filter-tcp=443",
+        "--filter-l7=tls",
+        "--hostlist-exclude-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com",
     ])
-
-    # User-evolved/enumerated strategy
+    # User strategy (tested by enumerator/GA)
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # ── QUIC: fake with known TTL ────────────────────────────────
-    # QUIC needs fake packets. Use fixed TTL from TSPU profiler
-    # (autottl doesn't work without --wf-tcp-in for UDP).
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 2: TLS for YouTube CDN (googlevideo etc.)
+    # These need gentler desync — only fake, no aggressive split
+    # ══════════════════════════════════════════════════════════════
     quic_ttl = tspu_ttl if tspu_ttl and tspu_ttl > 0 else 4
     cmd.extend([
         "--new",
-        "--filter-udp=443", "--filter-l7=quic",
+        "--filter-tcp=443",
+        "--filter-l7=tls",
+        "--hostlist-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com,youtube.com,youtu.be",
+        f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
+        "--lua-desync=multisplit:pos=midsld",
+    ])
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 3: HTTP (port 80)
+    # ══════════════════════════════════════════════════════════════
+    cmd.extend([
+        "--new",
+        "--filter-tcp=80",
+        "--filter-l7=http",
+    ])
+    for call in flags:
+        cmd.append(f"--lua-desync={call}")
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 4: QUIC (YouTube video + other UDP/443)
+    # fake with known TTL from TSPU profiler
+    # ══════════════════════════════════════════════════════════════
+    cmd.extend([
+        "--new",
+        "--filter-udp=443",
+        "--filter-l7=quic",
         "--payload=quic_initial",
         f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=11",
     ])
