@@ -100,15 +100,13 @@ _active_process: Optional[subprocess.Popen] = None
 def _signal_handler(signum, frame):
     global _running
     _running = False
-    print("\n  [!] Stopping... (please wait)")
+    from brain.ui import C, warn
+    warn("Stopping... (please wait)")
 
 
 def _print_header():
-    print()
-    print("=" * 60)
-    print("  PLGames Svoboda -- DPI Bypass Tool")
-    print("=" * 60)
-    print()
+    from brain.ui import print_banner
+    print_banner()
 
 
 def _find_zapret_binary(base_dir: Path) -> Optional[Path]:
@@ -398,18 +396,20 @@ def main():
     zapret_bin = _find_zapret_binary(BASE_DIR)
     lua_dir = _find_lua_dir(BASE_DIR)
 
+    from brain import ui
+
     if not zapret_bin:
-        print("  [ERROR] winws2.exe not found!")
-        print("  Download zapret2 from: https://github.com/bol-van/zapret2")
-        print("  Extract to this directory.")
-        input("  Press Enter to exit...")
+        ui.error("winws2.exe not found!")
+        ui.detail("Download zapret2 from: https://github.com/bol-van/zapret2")
+        ui.detail("Extract to this directory.")
+        input("\n  Press Enter to exit...")
         return
 
-    print(f"  [OK] zapret2: {zapret_bin}")
+    ui.ok(f"zapret2: {zapret_bin}")
     if lua_dir:
-        print(f"  [OK] Lua libs: {lua_dir}")
+        ui.ok(f"Lua libs: {lua_dir}")
     else:
-        print("  [WARN] zapret2 Lua libraries not found (limited functionality)")
+        ui.warn("zapret2 Lua libraries not found (limited functionality)")
 
     # ─── Init modules ─────────────────────────────────────────────────
     analytics = Analytics(config)
@@ -427,13 +427,12 @@ def main():
     if sync.is_configured:
         if sync.register_if_needed():
             ai.set_server_key(sync.api_key)
-            print(f"  [OK] Server connected")
+            ui.ok("Server connected")
         else:
-            print(f"  [!] Server unavailable (offline mode)")
+            ui.warn("Server unavailable (offline mode)")
 
     # ─── ISP Detection ────────────────────────────────────────────────
-    print()
-    print("  Detecting ISP...")
+    ui.step("Detecting ISP...")
     profiler = ISPProfiler(config)
     isp_name = "unknown"
     try:
@@ -441,11 +440,11 @@ def main():
         if profile:
             isp_name = profile.isp_name or "unknown"
             asn = profile.asn or "?"
-            print(f"  [OK] ISP: {isp_name} ({asn})")
+            ui.ok(f"ISP: {isp_name} ({asn})")
         else:
-            print("  [!] ISP detection failed (using generic strategies)")
+            ui.warn("ISP detection failed (using generic strategies)")
     except Exception as exc:
-        print(f"  [!] ISP detection error: {exc}")
+        ui.warn(f"ISP detection error: {exc}")
 
     # ─── Download blocklist ─────────────────────────────────────────
     print()
@@ -455,33 +454,34 @@ def main():
     from brain.tspu_profiler import TSPUProfiler
     tspu_profile = None
     try:
-        print()
-        print("  Profiling DPI/TSPU...")
+        ui.step("Profiling DPI/TSPU...")
         tspu = TSPUProfiler(timeout=5)
         tspu_profile = tspu.profile("youtube.com", isp=isp_name, asn=asn if 'asn' in dir() else "")
         if tspu_profile.dpi_hop_distance:
-            print(f"  [OK] DPI at ~{tspu_profile.dpi_hop_distance} hops, type: {tspu_profile.dpi_type}")
-            if tspu_profile.recommended_ttl:
-                print(f"       Recommended fake TTL: {tspu_profile.recommended_ttl}")
-        for e in tspu_profile.evidence[:3]:
-            print(f"       {e}")
+            ui.tspu_info(
+                tspu_profile.dpi_hop_distance, tspu_profile.dpi_type,
+                tspu_profile.recommended_ttl, tspu_profile.evidence,
+            )
     except Exception as exc:
-        print(f"  [!] TSPU profiling error: {exc}")
+        ui.warn(f"TSPU profiling error: {exc}")
 
     # ─── Smart block detection ──────────────────────────────────────
-    from brain.block_classifier import classify_and_print, BlockageClassifier
+    from brain.block_classifier import BlockageClassifier
 
     hosts = config.get("test_hosts", ["youtube.com", "discord.com", "cdn.discordapp.com"])
-    print()
-    print("  Analyzing blocking methods...")
-    block_results = classify_and_print(hosts, timeout=5)
+    ui.step("Analyzing blocking methods...")
+    classifier = BlockageClassifier(timeout=5)
+    block_results = {}
+    for host in hosts:
+        analysis = classifier.classify(host)
+        block_results[host] = analysis
+        ui.block_status(host, analysis.block_type, analysis.confidence, analysis.evidence)
 
     blocked = {h: r for h, r in block_results.items() if r.block_type != "NOT_BLOCKED"}
     all_accessible = len(blocked) == 0
 
     if all_accessible:
-        print()
-        print("  All sites accessible without DPI bypass.")
+        ui.ok("All sites accessible without DPI bypass.")
         print("  Starting monitoring mode (will activate if blocking detected)...")
         _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                          ai, sync, tier, profiler, isp_name, hostlist)
@@ -630,8 +630,7 @@ def main():
     enumerator = StrategyEnumerator(strategies=priority_strategies)
 
     def _enum_progress(i, total, name, fitness):
-        status = "OK" if fitness >= 0.6 else "fail"
-        print(f"    [{i}/{total}] {name}: {fitness:.3f} ({status})")
+        ui.enum_line(i, total, name, fitness, threshold=0.5)
 
     enum_result = enumerator.enumerate(
         tester, threshold=0.5, on_progress=_enum_progress,
@@ -1011,10 +1010,9 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name) -> Optional:
     def on_gen(gen, best):
         if not _running:
             return
+        from brain.ui import gen_line
         avg = sum(i.fitness for i in ga.population) / len(ga.population)
-        bar_len = int(best.fitness * 25)
-        bar = "#" * bar_len + "." * (25 - bar_len)
-        print(f"  Gen {gen:02d} [{bar}] best={best.fitness:.3f} avg={avg:.3f}")
+        gen_line(gen, best.fitness, avg)
 
         analytics.log_evolution_generation(
             generation=gen, best_fitness=best.fitness, avg_fitness=avg,
