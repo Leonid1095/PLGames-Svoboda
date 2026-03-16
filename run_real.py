@@ -672,6 +672,9 @@ def main():
                 # Watchdog for enumerated strategy
                 watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
                 active_strategy_id = record.id
+                _watchdog_checks = 0
+                _donate_shown = False
+                _donate_notified = False
                 while _running:
                     for _ in range(watchdog_interval):
                         if not _running:
@@ -679,6 +682,7 @@ def main():
                         time.sleep(1)
                     if not _running:
                         break
+                    _watchdog_checks += 1
                     now = datetime.now().strftime("%H:%M")
                     status_parts = []
                     for host in hosts:
@@ -696,6 +700,15 @@ def main():
                             status_parts.append(f"{short}:{(r['error_type'] or 'FAIL').upper()}")
                     health = analytics.get_all_hosts_health(hosts, minutes=10)
                     print(f"  [{now}] {' | '.join(status_parts)}  (health={health['overall_rate']:.0%})")
+
+                    # Donate reminder: terminal at 10 min, notification at 30 min
+                    if _watchdog_checks == 2 and not _donate_shown:
+                        ui.donate_reminder(donate.page_url, tier.current_tier_name if hasattr(tier, 'current_tier_name') else "FREE")
+                        _donate_shown = True
+                    if _watchdog_checks == 6 and not _donate_notified:
+                        ui.donate_notification(donate.page_url)
+                        _donate_notified = True
+
                     if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
                         print(f"\n  [!] Health degraded, re-evolving...")
                         _stop_permanent_zapret(_active_process)

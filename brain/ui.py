@@ -226,3 +226,39 @@ def separator():
     """Print a thin separator line."""
     cols = min(shutil.get_terminal_size((80, 24)).columns, 60)
     print(f"  {C.GRAY}{'─' * cols}{C.RESET}")
+
+
+# ─── Donate reminder ─────────────────────────────────────────────────────────
+
+def donate_reminder(donate_url: str, tier: str = "FREE"):
+    """Print donate reminder in terminal."""
+    if tier.upper() != "FREE":
+        return  # don't nag paying users
+    print()
+    separator()
+    print(f"  {C.YELLOW}{C.BOLD}Support PLGames Svoboda{C.RESET}")
+    print(f"  {C.GRAY}This tool is free, but development costs time and servers.{C.RESET}")
+    print(f"  {C.GRAY}Your donation keeps the project alive and unlocks:{C.RESET}")
+    print(f"    {C.CYAN}SUPPORTER (300 RUB):{C.RESET} AI analysis every 2h + priority strategies")
+    print(f"    {C.CYAN}PRO (600 RUB):{C.RESET} DeepSeek V3 AI + PLGames DNS (Germany)")
+    print()
+    print(f"  {C.BOLD}{C.BLUE}{donate_url}{C.RESET}")
+    separator()
+    print()
+
+
+def donate_notification(donate_url: str):
+    """Send Windows toast notification about donation."""
+    try:
+        from winotify import Notification, audio
+        toast = Notification(
+            app_id="PLGames Svoboda",
+            title="PLGames Svoboda works for you!",
+            msg="Support the project — your donation unlocks AI analysis and PLGames DNS bypass.",
+            duration="long",
+        )
+        toast.add_actions(label="Donate", launch=donate_url)
+        toast.set_audio(audio.Default, loop=False)
+        toast.show()
+    except Exception:
+        pass  # silently fail if winotify not available
