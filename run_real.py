@@ -252,16 +252,24 @@ def _start_permanent_zapret(
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (all HTTPS except YouTube CDN)
-    # YouTube CDN (googlevideo) breaks with multisplit → exclude it
+    # Uses circular orchestrator: auto-switches strategy on 3 failures
+    # strategy=1 is the tested/winning strategy
+    # strategy=2 is a fallback with different parameters
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--filter-tcp=443",
         "--filter-l7=tls",
         "--hostlist-exclude-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com",
     ])
-    # User strategy (tested by enumerator/GA)
+    # Circular orchestrator: auto-failover between strategies
+    cmd.append("--lua-desync=circular:fails=3")
+    # Strategy 1: user's tested strategy (primary)
     for call in flags:
-        cmd.append(f"--lua-desync={call}")
+        cmd.append(f"--lua-desync={call}:strategy=1")
+    # Strategy 2: fallback with different split positions
+    cmd.append("--lua-desync=multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000:strategy=2")
+    # Strategy 3: aggressive seqovl
+    cmd.append("--lua-desync=multisplit:pos=1,midsld,endhost-1:seqovl=6:seqovl_pattern=0x1603030000:strategy=3")
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2: TLS for YouTube CDN (googlevideo etc.)
