@@ -65,12 +65,27 @@ run.bat
 
 **Требования:** Windows 10+, Python 3.10+, права администратора
 
+### 💰 Тарифы
+
+Все функции работают бесплатно. Донаты покрывают хостинг серверов, AI и разработку.
+
+| Тариф | Цена | AI анализ | Что получаете |
+|-------|------|-----------|--------------|
+| **Free** | 0 | 1 раз/день | Полный обход + 3 AI модели + стратегии сообщества |
+| **Supporter** | 300 ₽ | ~12 раз/день | Приоритетные стратегии + частый AI анализ |
+| **Pro** | 600 ₽ | ~48 раз/день | DeepSeek V3 + PLGames DNS (Германия) |
+
+🤖 **3 бесплатные AI модели** анализируют подключение и подбирают оптимальную стратегию. Донаты открывают более частый анализ — критично когда провайдер меняет блокировки.
+
+💡 *Цены покрывают исключительно хостинг серверов, AI инфраструктуру и обновление списков блокировок.*
+
+**[→ Поддержать на DonatePay](https://new.donatepay.ru/@lenya)**
+
 ### 🔒 Приватность
 
 - Никаких личных данных — ни IP, ни MAC, ни имени компьютера
 - Анонимная телеметрия — только тип провайдера и результат стратегии
-- Всё шифрование на стороне сервера — в коде нет ключей API
-- Телеметрия помогает AI учиться и улучшать обход для всех пользователей
+- Данные помогают AI учиться и улучшать обход для всех пользователей
 - Можно отключить в config.json (`"telemetry_consent": false`)
 
 ---
@@ -147,15 +162,19 @@ Apply + Monitor 24/7 → Re-evolve on degradation
 
 ## 💰 Support the Project
 
-| Tier | Price | What you get |
-|------|-------|-------------|
-| **Free** | 0 | Full bypass + AI 1x/day |
-| **Supporter** | 300 RUB | AI every 2h + priority strategies |
-| **Pro** | 600 RUB | DeepSeek V3 AI + PLGames DNS |
+All features work for free. Donations cover server costs, AI infrastructure, and development.
+
+| Tier | Price | AI Analysis | What you get |
+|------|-------|-------------|-------------|
+| **Free** | 0 | 1x/day | Full bypass + community strategies + 3 AI models |
+| **Supporter** | 300 RUB | ~12x/day | Priority strategies + faster AI analysis |
+| **Pro** | 600 RUB | ~48x/day | DeepSeek V3 + PLGames DNS (Germany) |
+
+🤖 **3 free AI models** analyze your connection and find optimal bypass strategy. Donations unlock more frequent analysis — critical when ISP changes blocking methods.
+
+💡 *Prices cover server hosting, AI compute, and domain blocklist infrastructure only.*
 
 **[→ Donate on DonatePay](https://new.donatepay.ru/@lenya)**
-
-Your donation keeps the servers running and the AI learning.
 
 ---
 
