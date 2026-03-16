@@ -954,24 +954,95 @@ def main():
                 print(f"  [!] {host}: {streak_fail} consecutive failures")
 
         if needs_reevolve:
-            print(f"\n  [!] Re-evolving strategy...")
+            from brain.block_classifier import BlockageClassifier
+            from brain.failure_analyzer import FailureAnalyzer
+            from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
+
+            ui.separator()
+            ui.warn("Connection degraded — starting autonomous recovery cycle")
+
+            # ── Step 1: Classify what's broken ───────────────────────
+            ui.step("Step 1: Analyzing block type...")
+            classifier = BlockageClassifier(timeout=5)
+            failed_hosts = [h for h in degraded]
+            for fh in failed_hosts[:3]:
+                analysis = classifier.classify(fh)
+                ui.block_status(fh, analysis.block_type, analysis.confidence, analysis.evidence)
+                # Record for AI feedback
+                ai_feedback.record_test(
+                    [f"watchdog_check:{fh}"], 0.0,
+                    failure_mode=analysis.block_type.lower(),
+                )
+
+            # ── Step 2: AI analysis of failure ───────────────────────
+            ui.step("Step 2: AI analyzing failure pattern...")
+            analyzer = FailureAnalyzer()
+            report = analyzer.analyze(
+                flags=best.flags if best else [],
+                fitness=overall,
+                host_results=health.get("hosts", {}),
+                tspu_profile=tspu_profile,
+            )
+            ui.info(f"Root cause: {report.root_cause} ({report.confidence:.0%})")
+            ui.detail(report.explanation[:120])
+            for change in report.changes[:2]:
+                ui.detail(f"Suggestion: {change.action} {change.target} → {change.new_value}")
+
+            # ── Step 3: Try AI-suggested fix first ───────────────────
             _stop_permanent_zapret(_active_process)
             _active_process = None
-
             cycle_num += 1
-            seeds = _get_seeds(isp_name, ai)
-            best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
+            found_fix = False
 
-            if best and best.fitness > 0.1:
-                record = manager.save_strategy(best.flags, best.fitness, isp_name)
-                active_strategy_id = record.id
-                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
-                if _active_process:
-                    print(f"  [OK] New strategy applied (fitness={best.fitness:.3f})")
-                else:
-                    print("  [ERROR] Failed to apply new strategy")
+            if report.improved_flags:
+                ui.step("Step 3: Testing AI suggestion...")
+                for improved in report.improved_flags[:2]:
+                    fit = tester.test_strategy(improved)
+                    ai_feedback.record_test(improved, fit, "ok" if fit > 0.3 else "timeout")
+                    if fit > 0.5:
+                        ui.ok(f"AI fix works! fitness={fit:.3f}")
+                        record = manager.save_strategy(improved, fit, isp_name)
+                        active_strategy_id = record.id
+                        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, improved, hostlist, _tspu_recommended_ttl)
+                        found_fix = bool(_active_process)
+                        if found_fix:
+                            sync.vote_strategy(improved, success=True, fitness=fit, isp=isp_name)
+                            break
+
+            # ── Step 4: Fast enumeration if AI didn't help ───────────
+            if not found_fix:
+                ui.step("Step 4: Fast enumeration...")
+                excluded = ai_feedback.get_excluded_functions()
+                enum = StrategyEnumerator(excluded_functions=excluded)
+                result = enum.enumerate(tester, threshold=0.5,
+                    on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, 0.5))
+                if result:
+                    ui.ok(f"Found: {result['name']} (fitness={result['fitness']:.3f})")
+                    record = manager.save_strategy(result["flags"], result["fitness"], isp_name)
+                    active_strategy_id = record.id
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, result["flags"], hostlist, _tspu_recommended_ttl)
+                    found_fix = bool(_active_process)
+
+            # ── Step 5: GA evolution as last resort ──────────────────
+            if not found_fix:
+                ui.step("Step 5: GA evolution (last resort)...")
+                seeds = _get_seeds(isp_name, ai)
+                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
+                if best and best.fitness > 0.1:
+                    record = manager.save_strategy(best.flags, best.fitness, isp_name)
+                    active_strategy_id = record.id
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
+                    found_fix = bool(_active_process)
+
+            # ── Step 6: Report to server ─────────────────────────────
+            if sync.is_configured:
+                sync.sync_now()
+
+            if found_fix:
+                ui.ok(f"Recovery complete — bypass restored")
             else:
-                print("  [!] No better strategy found, keeping current")
+                ui.warn("Could not find working strategy. Will retry next cycle.")
+            ui.separator()
 
     # ─── Shutdown ─────────────────────────────────────────────────────
     print()
