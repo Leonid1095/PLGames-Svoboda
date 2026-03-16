@@ -425,6 +425,10 @@ def main():
     fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(name)s: %(message)s"))
     log.addHandler(fh)
 
+    # ─── AI Feedback Loop ────────────────────────────────────────────
+    from brain.ai_feedback import AIFeedbackLoop
+    ai_feedback = AIFeedbackLoop()
+
     # ─── Verify zapret2 ──────────────────────────────────────────────
     zapret_bin = _find_zapret_binary(BASE_DIR)
     lua_dir = _find_lua_dir(BASE_DIR)
@@ -548,10 +552,43 @@ def main():
                 sync.vote_strategy(community["flags"], success=True, fitness=verified, isp=isp_name, dpi_type=dpi_type)
                 # Apply directly — skip everything
                 record = manager.save_strategy(community["flags"], verified, isp_name)
+                ai_feedback.record_test(community["flags"], verified, "ok")
                 _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist, _tspu_recommended_ttl)
                 if _active_process:
-                    print(f"\n  === DPI BYPASS ACTIVE (community strategy) ===\n")
-                    # TODO: go to watchdog
+                    time.sleep(2)
+                    verify = _quick_connectivity_check(hosts)
+                    working = sum(1 for ok_v in verify.values() if ok_v)
+                    total_h = len(verify)
+                    for host, ok_v in verify.items():
+                        print(f"    {host}: {'OK' if ok_v else 'FAIL'}")
+                    if working > 0:
+                        ui.bypass_active(working, total_h, " | ".join(community["flags"]),
+                                         tier.get_status_line(), donate.page_url)
+                        # Watchdog loop
+                        watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
+                        while _running:
+                            for _ in range(watchdog_interval):
+                                if not _running:
+                                    break
+                                time.sleep(1)
+                            if not _running:
+                                break
+                            now = datetime.now().strftime("%H:%M")
+                            host_statuses = []
+                            for host in hosts:
+                                r = _curl_check_one(host, timeout=5)
+                                host_statuses.append((host, r["success"], r["latency_ms"]))
+                            health = analytics.get_all_hosts_health(hosts, minutes=10)
+                            ui.monitor_line(now, host_statuses, health["overall_rate"])
+                            if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
+                                ui.warn("Health degraded, re-evolving...")
+                                _stop_permanent_zapret(_active_process)
+                                _active_process = None
+                                break
+                        if _running and _active_process:
+                            _stop_permanent_zapret(_active_process)
+                        analytics.close()
+                        return
             else:
                 print(f"  [!] Community strategy failed (fitness={verified:.3f})")
                 sync.vote_strategy(community["flags"], success=False, fitness=verified, isp=isp_name, dpi_type=dpi_type)
@@ -649,6 +686,10 @@ def main():
     # ─── Fast enumeration (blockcheck2-style) ──────────────────────
     from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
 
+    excluded = ai_feedback.get_excluded_functions()
+    if excluded:
+        ui.info(f"AI excluded from search: {', '.join(excluded)}")
+
     # Build priority list: classifier recommendations first, then known strategies
     priority_strategies = []
     for i, flags in enumerate(classifier_strategies):
@@ -657,11 +698,10 @@ def main():
             "flags": flags,
             "desc": f"AI-recommended for detected block type",
         })
-    # Add standard known strategies after
     priority_strategies.extend(KNOWN_STRATEGIES)
 
     print(f"\n  Fast strategy enumeration ({len(priority_strategies)} strategies, AI-prioritized)...")
-    enumerator = StrategyEnumerator(strategies=priority_strategies)
+    enumerator = StrategyEnumerator(strategies=priority_strategies, excluded_functions=excluded)
 
     def _enum_progress(i, total, name, fitness):
         ui.enum_line(i, total, name, fitness, threshold=0.5)
@@ -1052,7 +1092,9 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name) -> Optional:
     print("  Each strategy is tested with real connections.")
     print()
 
-    ga = StrategyGene(ga_config, seed_strategies=seeds)
+    # Get excluded functions from AI feedback (global)
+    _excluded = ai_feedback.get_excluded_functions() if 'ai_feedback' in dir() else set()
+    ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded)
 
     def on_gen(gen, best):
         if not _running:

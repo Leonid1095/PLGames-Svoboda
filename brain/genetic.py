@@ -117,9 +117,11 @@ class GAConfig:
 class StrategyGene:
     """Genetic algorithm for evolving zapret2 lua-desync strategies."""
 
-    def __init__(self, config: GAConfig, seed_strategies: Optional[list[list[str]]] = None):
+    def __init__(self, config: GAConfig, seed_strategies: Optional[list[list[str]]] = None,
+                 excluded_functions: Optional[set[str]] = None):
         self.config = config
         self.seed_strategies = seed_strategies or []
+        self.excluded_functions = excluded_functions or set()
         self.population: list[Individual] = []
         self.generation: int = 0
         self.best_ever: Optional[Individual] = None
@@ -127,6 +129,13 @@ class StrategyGene:
         self._stagnation_count: int = 0
         self._last_best_fitness: float = 0.0
         self._base_mutation_rate: float = config.mutation_rate
+
+        # Filter DESYNC_FUNCTIONS based on AI feedback exclusions
+        self._active_functions = [f for f in DESYNC_FUNCTIONS if f not in self.excluded_functions]
+        if not self._active_functions:
+            self._active_functions = ["multisplit", "multidisorder"]  # always keep these
+        if self.excluded_functions:
+            logger.info("GA: excluded functions from AI feedback: %s", self.excluded_functions)
 
     def set_generation_callback(self, callback: Callable[[int, Individual], None]) -> None:
         """Set callback called after each generation."""
@@ -225,8 +234,8 @@ class StrategyGene:
         return calls
 
     def _random_desync_call(self) -> str:
-        """Generate a random primary desync function call."""
-        func = random.choice(DESYNC_FUNCTIONS)
+        """Generate a random primary desync function call (respects AI exclusions)."""
+        func = random.choice(self._active_functions)
         params = self._random_params_for(func)
         if params:
             return f"{func}:{':'.join(params)}"
@@ -427,8 +436,12 @@ class StrategyGene:
         if not flags:
             flags = [self._random_desync_call()]
 
+        # Remove excluded functions from flags
+        if self.excluded_functions:
+            flags = [f for f in flags if f.split(":")[0] not in self.excluded_functions]
+
         # Must have at least one primary desync function
-        has_primary = any(f.split(":")[0] in DESYNC_FUNCTIONS for f in flags)
+        has_primary = any(f.split(":")[0] in self._active_functions for f in flags)
         if not has_primary:
             flags.insert(0, self._random_desync_call())
 

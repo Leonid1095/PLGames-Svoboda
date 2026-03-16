@@ -189,8 +189,10 @@ class StrategyEnumerator:
     Returns first strategy that passes threshold.
     """
 
-    def __init__(self, strategies: Optional[list[dict]] = None):
+    def __init__(self, strategies: Optional[list[dict]] = None,
+                 excluded_functions: Optional[set[str]] = None):
         self.strategies = strategies or KNOWN_STRATEGIES
+        self.excluded_functions = excluded_functions or set()
 
     def enumerate(
         self,
@@ -199,6 +201,8 @@ class StrategyEnumerator:
         on_progress: Optional[callable] = None,
     ) -> Optional[dict]:
         """Test strategies in order, return first passing threshold.
+
+        Skips strategies containing excluded functions (from AI feedback).
 
         Args:
             tester: ConnectionTester instance (mock=False for real testing)
@@ -214,6 +218,17 @@ class StrategyEnumerator:
         for i, strat in enumerate(self.strategies):
             name = strat["name"]
             flags = strat["flags"]
+
+            # Skip strategies with excluded functions (AI feedback)
+            if self.excluded_functions:
+                has_excluded = any(
+                    f.split(":")[0] in self.excluded_functions for f in flags
+                )
+                if has_excluded:
+                    logger.debug("Skipping %s (contains excluded function)", name)
+                    if on_progress:
+                        on_progress(i + 1, total, f"{name} [SKIP]", 0.0)
+                    continue
 
             fitness = tester.test_strategy(flags)
 
