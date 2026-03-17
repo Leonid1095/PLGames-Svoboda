@@ -30,6 +30,7 @@ class BlockProbe:
     tcp_connect_ok: bool = False
     tls_handshake_ok: bool = False
     http_response_ok: bool = False
+    http_port80_ok: bool = False       # HTTP (not HTTPS) works
     # Detailed metrics
     tcp_connect_ms: float = 0.0
     tls_handshake_ms: float = 0.0
@@ -146,7 +147,7 @@ class BlockageClassifier:
     # ─── Probing ──────────────────────────────────────────────────────────
 
     def _probe_host(self, host: str) -> BlockProbe:
-        """Multi-stage probe: DNS → TCP → TLS → HTTP → HTTP/2 stream."""
+        """Multi-stage probe: DNS → TCP raw → HTTP → HTTPS → H2 stream."""
         probe = BlockProbe(host=host)
 
         # Stage 1: DNS resolution
@@ -154,14 +155,54 @@ class BlockageClassifier:
         if not probe.dns_ok:
             return probe
 
-        # Stage 2: TCP connect + TLS + HTTP (with detailed timing)
+        # Stage 2: Raw TCP connect (port 443, no TLS)
+        # If TCP connects but TLS fails → SNI filtering
+        # If TCP doesn't connect → IP block or network issue
+        probe.tcp_connect_ok = self._check_tcp_connect(host, 443)
+
+        # Stage 3: HTTP (port 80) — is it blocked too?
+        # If HTTP works but HTTPS doesn't → SNI-based blocking
+        probe.http_port80_ok = self._check_http(host)
+
+        # Stage 4: HTTPS with detailed timing
         self._check_curl_detailed(host, probe)
 
-        # Stage 3: If basic HTTPS works, test HTTP/2 stream
+        # Stage 5: If basic HTTPS works, test HTTP/2 stream
         if probe.http_response_ok:
             self._check_h2_stream(host, probe)
 
+        # Override: if TCP connects but HTTPS times out → it's SNI, not IP
+        if probe.tcp_connect_ok and probe.timeout and not probe.http_response_ok:
+            probe.block_type = "SNI_FILTERING"
+            probe.confidence = 0.85
+
         return probe
+
+    def _check_tcp_connect(self, host: str, port: int) -> bool:
+        """Raw TCP connect test (no TLS). Tests if IP is reachable."""
+        import socket as sock
+        try:
+            s = sock.socket(sock.AF_INET, sock.SOCK_STREAM)
+            s.settimeout(3)
+            result = s.connect_ex((host, port))
+            s.close()
+            return result == 0
+        except Exception:
+            return False
+
+    def _check_http(self, host: str) -> bool:
+        """Test HTTP (port 80) — if this works, IP is not blocked."""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "3", f"http://{host}",
+                 "-o", "NUL" if self._is_windows else "/dev/null",
+                 "-w", "%{http_code}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+            return code in {200, 301, 302, 303, 307, 308, 403, 404}
+        except Exception:
+            return False
 
     def _check_dns(self, host: str) -> bool:
         """Check if DNS resolves."""
@@ -307,18 +348,21 @@ class BlockageClassifier:
 
         # Timeout
         if probe.timeout:
-            if probe.tcp_connect_ok and not probe.tls_handshake_ok:
-                # TCP works but TLS fails = SNI filtering (silent drop)
-                return self._make_analysis(probe, "SNI_FILTERING", 0.80, [
-                    "TCP connect succeeded",
-                    "TLS handshake timed out",
-                    "DPI silently drops after seeing SNI in ClientHello",
-                ])
-            elif not probe.tcp_connect_ok:
-                # Can't even TCP connect = IP block or heavy throttling
-                return self._make_analysis(probe, "IP_BLOCK", 0.60, [
-                    "TCP connect failed/timed out",
-                    "Possible IP-level blocking",
+            if probe.tcp_connect_ok or probe.http_port80_ok:
+                # TCP or HTTP works but HTTPS fails = SNI filtering
+                evidence = []
+                if probe.tcp_connect_ok:
+                    evidence.append("TCP connect to port 443 succeeded")
+                if probe.http_port80_ok:
+                    evidence.append("HTTP port 80 works → IP is NOT blocked")
+                evidence.append("HTTPS timed out → DPI blocks based on TLS SNI")
+                return self._make_analysis(probe, "SNI_FILTERING", 0.85, evidence)
+            elif not probe.tcp_connect_ok and not probe.http_port80_ok:
+                # Nothing connects = real IP block
+                return self._make_analysis(probe, "IP_BLOCK", 0.70, [
+                    "TCP connect failed",
+                    "HTTP port 80 also failed",
+                    "IP-level blocking or network unreachable",
                 ])
             else:
                 return self._make_analysis(probe, "TIMEOUT_SILENT", 0.70, [
