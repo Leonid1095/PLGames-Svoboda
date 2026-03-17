@@ -100,15 +100,45 @@ class AIAdvisor:
         """Update server API key (after auto-registration)."""
         self._server_key = key
 
-    def suggest_strategies(self, isp: str, middlebox_type: str = "unknown", region: str = "") -> list[list[str]]:
-        """Ask AI to suggest new strategies based on collected data.
+    def suggest_strategies(
+        self, isp: str, middlebox_type: str = "unknown", region: str = "",
+        ai_feedback=None, tspu_profile=None,
+    ) -> list[list[str]]:
+        """Ask AI to suggest strategies using structured feedback data.
 
+        If ai_feedback is provided, sends full test history + observations.
         Falls back to built-in expert strategies if server is unavailable.
         """
-        # Try server AI first
+        # Try server AI with structured context
         if self.is_available:
-            context = self._build_context(isp, middlebox_type, region)
-            prompt = f"""Suggest 3-5 zapret2 desync strategies for this network:
+            if ai_feedback and hasattr(ai_feedback, 'build_structured_prompt'):
+                # NEW: structured prompt with full test history
+                best_known = None
+                best_fitness = 0.0
+                best_db = self._analytics.get_best_flags_for_isp(isp, limit=1)
+                if best_db:
+                    best_known = best_db[0]["flags"]
+                    best_fitness = best_db[0]["fitness"]
+
+                tspu_dict = {}
+                if tspu_profile:
+                    tspu_dict = {
+                        "dpi_hop_distance": getattr(tspu_profile, 'dpi_hop_distance', None),
+                        "server_hop_distance": getattr(tspu_profile, 'server_hop_distance', None),
+                        "recommended_ttl": getattr(tspu_profile, 'recommended_ttl', None),
+                        "blocks_tls_sni": getattr(tspu_profile, 'blocks_tls_sni', True),
+                        "dpi_type": getattr(tspu_profile, 'dpi_type', 'unknown'),
+                    }
+
+                prompt = ai_feedback.build_structured_prompt(
+                    isp=isp, asn="", tspu_profile=tspu_dict,
+                    best_known=best_known, best_fitness=best_fitness,
+                    problem=f"Need better strategies for {isp}, middlebox={middlebox_type}",
+                )
+            else:
+                # Legacy: simple prompt
+                context = self._build_context(isp, middlebox_type, region)
+                prompt = f"""Suggest 3-5 zapret2 desync strategies for this network:
 
 ISP: {isp}
 Middlebox: {middlebox_type}

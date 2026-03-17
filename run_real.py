@@ -734,8 +734,11 @@ def main():
     def _enum_progress(i, total, name, fitness):
         ui.enum_line(i, total, name, fitness, threshold=0.5)
 
+    def _enum_record(flags, fitness):
+        ai_feedback.record_test(flags, fitness, "ok" if fitness > 0.3 else "timeout")
+
     enum_result = enumerator.enumerate(
-        tester, threshold=0.5, on_progress=_enum_progress,
+        tester, threshold=0.5, on_progress=_enum_progress, on_result=_enum_record,
     )
 
     if enum_result:
@@ -744,6 +747,7 @@ def main():
         best_fitness = enum_result["fitness"]
         print(f"\n  [OK] Found: {enum_result['name']} (fitness={best_fitness:.3f})")
         print(f"       {enum_result.get('desc', '')}")
+        ai_feedback.record_test(best_flags, best_fitness, "ok")
 
         # Save and apply
         record = manager.save_strategy(best_flags, best_fitness, isp_name)
@@ -1168,11 +1172,16 @@ def _get_seeds(isp_name: str, ai: AIAdvisor) -> list[list[str]]:
         seeds = ISP_SEED_STRATEGIES[isp_name] + seeds
         print(f"  Using {isp_name} seed strategies + generic")
 
-    # AI suggestions
+    # AI suggestions (with structured feedback if available)
     if ai.is_available:
         print("  Asking AI for strategy suggestions...")
         try:
-            ai_seeds = ai.suggest_strategies(isp=isp_name, middlebox_type="unknown")
+            _fb = ai_feedback if 'ai_feedback' in dir() else None
+            _tp = tspu_profile if 'tspu_profile' in dir() else None
+            ai_seeds = ai.suggest_strategies(
+                isp=isp_name, middlebox_type="unknown",
+                ai_feedback=_fb, tspu_profile=_tp,
+            )
             if ai_seeds:
                 print(f"  AI suggested {len(ai_seeds)} strategies")
                 seeds.extend(ai_seeds)

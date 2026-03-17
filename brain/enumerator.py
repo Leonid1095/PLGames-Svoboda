@@ -217,10 +217,12 @@ class StrategyEnumerator:
         tester: ConnectionTester,
         threshold: float = 0.6,
         on_progress: Optional[callable] = None,
+        on_result: Optional[callable] = None,
     ) -> Optional[dict]:
         """Test strategies in order, return first passing threshold.
 
         Skips strategies containing excluded functions (from AI feedback).
+        on_result(flags, fitness) — called after each test for AI feedback.
 
         Args:
             tester: ConnectionTester instance (mock=False for real testing)
@@ -252,6 +254,8 @@ class StrategyEnumerator:
 
             if on_progress:
                 on_progress(i + 1, total, name, fitness)
+            if on_result:
+                on_result(flags, fitness)
 
             logger.info(
                 "Enum [%d/%d] %s: fitness=%.3f %s",
