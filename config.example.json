@@ -35,5 +35,7 @@
   "app_version": "0.3.0-beta",
   "ai_enabled": true,
   "donatepay_page_url": "https://new.donatepay.ru/@lenya",
-  "shadow_cycle_minutes": 10
+  "shadow_cycle_minutes": 10,
+  "morphing_enabled": true,
+  "morphing_profile": "chrome_win"
 }

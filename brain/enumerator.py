@@ -179,6 +179,24 @@ KNOWN_STRATEGIES: list[dict] = [
         ],
         "desc": "Single fakedsplit with fixed TTL",
     },
+
+    # ── Tier 6: morphed strategies (anti-ML DPI) ────────────────────
+    {
+        "name": "morphed_disorder_seqovl",
+        "flags": [
+            "wssize:wsize=65535:scale=7",
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "Chrome-like window + disorder (anti-ML morphing)",
+    },
+    {
+        "name": "morphed_split_padencap",
+        "flags": [
+            "wssize:wsize=65535:scale=7",
+            "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000",
+        ],
+        "desc": "Chrome-like window + split with padding",
+    },
 ]
 
 

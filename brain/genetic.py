@@ -61,7 +61,9 @@ DESYNC_PARAMS = {
 
     # TLS modification
     "tls_mod": ["rnd", "rndsni", "dupsid", "rnd,rndsni", "rnd,dupsid",
-                "rnd,rndsni,dupsid", "rnd,dupsid,sni=www.google.com"],
+                "rnd,rndsni,dupsid", "rnd,dupsid,sni=www.google.com",
+                # Morphing: padencap adds TLS padding extension (anti-ML)
+                "rnd,rndsni,padencap", "rnd,rndsni,dupsid,padencap"],
 
     # IP fragmentation
     "ipfrag": None,

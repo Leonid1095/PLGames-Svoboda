@@ -201,6 +201,7 @@ def _download_hostlist(base_dir: Path) -> Optional[Path]:
 def _start_permanent_zapret(
     binary: Path, lua_dir: Optional[Path], flags: list[str],
     hostlist: Optional[Path] = None, tspu_ttl: int = 0,
+    config: Optional[dict] = None,
 ) -> Optional[subprocess.Popen]:
     """Start winws2/nfqws2 permanently with the given strategy.
 
@@ -236,6 +237,16 @@ def _start_permanent_zapret(
         if auto.exists():
             cmd.append(f"--lua-init=@{os.path.relpath(str(auto), base)}")
 
+    # Traffic morphing: apply browser TLS profile
+    from brain.morpher import TrafficMorpher
+    morpher = TrafficMorpher(
+        profile_name=config.get("morphing_profile", "chrome_win") if config else "chrome_win",
+        enabled=config.get("morphing_enabled", True) if config else True,
+    )
+    tls_init = morpher.get_tls_init()
+    if tls_init:
+        cmd.append(f"--lua-init={tls_init}")
+
     # Hostlist: copy to binary dir to avoid path issues
     if hostlist and hostlist.exists():
         import shutil
@@ -265,10 +276,15 @@ def _start_permanent_zapret(
         "--hostlist-exclude-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com",
         "--in-range=-s34228",  # needed for circular conntrack
     ])
+    # Traffic morphing: browser-like TCP window
+    morph_calls = morpher.get_permanent_calls()
+    for mc in morph_calls:
+        cmd.append(f"--lua-desync={mc}")
     # Circular orchestrator: auto-failover between strategies
     cmd.append("--lua-desync=circular")
     # Strategy 1: user's tested strategy (primary)
-    for call in flags:
+    morphed_flags = morpher.morph_strategy(flags)
+    for call in morphed_flags:
         cmd.append(f"--lua-desync={call}:strategy=1")
     # Strategy 2: fallback with different split positions
     cmd.append("--lua-desync=multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000:strategy=2")
@@ -565,7 +581,7 @@ def main():
                 # Apply directly — skip everything
                 record = manager.save_strategy(community["flags"], verified, isp_name)
                 ai_feedback.record_test(community["flags"], verified, "ok")
-                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist, _tspu_recommended_ttl)
+                _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist, _tspu_recommended_ttl, config)
                 if _active_process:
                     time.sleep(2)
                     verify = _quick_connectivity_check(hosts)
@@ -624,7 +640,7 @@ def main():
 
             print(f"\n  Applying cached strategy (fitness={best_fitness:.3f})...")
             print(f"  Strategy: {' | '.join(best_flags)}")
-            _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl)
+            _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl, config)
 
             if _active_process:
                 time.sleep(2)
@@ -736,7 +752,7 @@ def main():
             isp=isp_name, source="enumeration",
         )
 
-        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl)
+        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl, config)
         if _active_process:
             time.sleep(2)
             verify = _quick_connectivity_check(hosts)
@@ -864,7 +880,7 @@ def main():
     print(f"  Applying strategy (fitness={best.fitness:.3f})...")
     print(f"  Strategy: {' | '.join(best.flags)}")
 
-    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
+    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl, config)
 
     if _active_process is None:
         print("  [ERROR] Failed to start DPI bypass!")
@@ -1007,7 +1023,7 @@ def main():
                         ui.ok(f"AI fix works! fitness={fit:.3f}")
                         record = manager.save_strategy(improved, fit, isp_name)
                         active_strategy_id = record.id
-                        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, improved, hostlist, _tspu_recommended_ttl)
+                        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, improved, hostlist, _tspu_recommended_ttl, config)
                         found_fix = bool(_active_process)
                         if found_fix:
                             sync.vote_strategy(improved, success=True, fitness=fit, isp=isp_name)
@@ -1024,7 +1040,7 @@ def main():
                     ui.ok(f"Found: {result['name']} (fitness={result['fitness']:.3f})")
                     record = manager.save_strategy(result["flags"], result["fitness"], isp_name)
                     active_strategy_id = record.id
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, result["flags"], hostlist, _tspu_recommended_ttl)
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, result["flags"], hostlist, _tspu_recommended_ttl, config)
                     found_fix = bool(_active_process)
 
             # ── Step 5: GA evolution as last resort ──────────────────
@@ -1035,7 +1051,7 @@ def main():
                 if best and best.fitness > 0.1:
                     record = manager.save_strategy(best.flags, best.fitness, isp_name)
                     active_strategy_id = record.id
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl, config)
                     found_fix = bool(_active_process)
 
             # ── Step 6: Report to server ─────────────────────────────
@@ -1118,7 +1134,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
 
                 if best and best.fitness > 0.1:
                     manager.save_strategy(best.flags, best.fitness, isp_name)
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl)
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl, config)
                     if _active_process:
                         print(f"\n  === DPI BYPASS ACTIVE (fitness={best.fitness:.3f}) ===\n")
 
