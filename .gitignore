@@ -12,6 +12,7 @@ isp_profile.json
 lua/svoboda_strategy.lua
 hostlist.txt
 hostlist-auto.txt
+host_strategies.json
 .env
 .env.local
 config.json

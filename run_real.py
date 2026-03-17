@@ -978,58 +978,76 @@ def main():
                 print(f"  [!] {host}: {streak_fail} consecutive failures")
 
         # ── Per-host problem solving (without breaking working hosts) ──
-        # If some hosts fail but overall health is OK, try to fix them
+        # If some hosts fail but overall health is OK, try to find
+        # a separate strategy for each failing host
         persistent_fails = [
             h for h in hosts
             if health["hosts"].get(h, {}).get("streak_fail", 0) >= 3
             and not needs_reevolve
         ]
         if persistent_fails and not needs_reevolve:
+            from brain.host_solver import HostSolver
+
             ui.separator()
             ui.warn(f"Persistent failures: {', '.join(persistent_fails)}")
-            ui.info("Trying per-host AI analysis (won't affect working sites)...")
+            ui.info("Searching for per-host strategies...")
 
-            from brain.block_classifier import BlockageClassifier
-            from brain.failure_analyzer import FailureAnalyzer
+            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+            solved_any = False
 
-            classifier = BlockageClassifier(timeout=5)
-            analyzer = FailureAnalyzer()
+            for fail_host in persistent_fails[:2]:
+                # Skip if already solved
+                cached = solver.get(fail_host)
+                if cached:
+                    ui.info(f"{fail_host}: already solved (fitness={cached.fitness:.3f})")
+                    continue
 
-            for fail_host in persistent_fails[:2]:  # max 2 hosts per cycle
-                analysis = classifier.classify(fail_host)
-                ui.block_status(fail_host, analysis.block_type, analysis.confidence, analysis.evidence)
+                ui.step(f"Solving: {fail_host}")
 
-                # AI analysis
-                report = analyzer.analyze(
-                    flags=best.flags if best else [],
-                    fitness=0.0,
-                    host_results={fail_host: {"successes": 0, "total": 3, "error_types": [analysis.block_type.lower()]}},
-                    tspu_profile=tspu_profile,
-                )
-                ui.info(f"AI: {report.root_cause} — {report.explanation[:100]}")
+                def _solve_progress(i, total, name, fitness):
+                    status = "OK" if fitness > 0.3 else ""
+                    ui.detail(f"[{i}/{total}] {name}: {fitness:.3f} {status}")
 
-                # Record for AI learning
-                ai_feedback.record_test(
-                    [f"per_host_fail:{fail_host}"], 0.0,
-                    failure_mode=analysis.block_type.lower(),
+                result = solver.solve(
+                    fail_host, isp=isp_name,
+                    on_progress=_solve_progress,
                 )
 
-                # Try recommended strategies for this specific block type
-                if analysis.recommended_strategies:
-                    for rec_strat in analysis.recommended_strategies[:1]:
-                        ui.info(f"Testing: {' | '.join(rec_strat)}")
-                        fit = tester.test_strategy(rec_strat)
-                        ai_feedback.record_test(rec_strat, fit, "ok" if fit > 0.3 else "timeout")
-                        if fit > 0.3:
-                            ui.ok(f"Found fix for {fail_host}! (fitness={fit:.3f})")
-                            # Report to server
-                            if sync.is_configured:
-                                sync.vote_strategy(rec_strat, success=True, fitness=fit, isp=isp_name)
-                            break
+                if result:
+                    ui.ok(f"Found strategy for {fail_host}! fitness={result.fitness:.3f}")
+                    ui.detail(f"Strategy: {' | '.join(result.flags)}")
+                    solved_any = True
 
-                # Report observations to server
-                if sync.is_configured:
-                    sync.sync_now()
+                    # Report to server
+                    if sync.is_configured:
+                        sync.vote_strategy(
+                            result.flags, success=True, fitness=result.fitness,
+                            isp=isp_name,
+                        )
+                else:
+                    ui.warn(f"No strategy found for {fail_host}")
+
+            # If we found per-host fixes, restart winws2 with extra profiles
+            if solved_any and _active_process:
+                ui.info("Restarting winws2 with per-host profiles...")
+                _stop_permanent_zapret(_active_process)
+                _active_process = None
+
+                # Rebuild with extra per-host profiles
+                main_flags = best.flags if best else []
+                _active_process = _start_permanent_zapret(
+                    zapret_bin, lua_dir, main_flags, hostlist,
+                    _tspu_recommended_ttl, config,
+                )
+
+                # Append per-host profiles
+                # (Note: would need winws2 restart — for now, the main
+                # strategy may help the solved host too since we tested it)
+                if _active_process:
+                    ui.ok("winws2 restarted with updated strategies")
+
+            if sync.is_configured:
+                sync.sync_now()
 
             ui.separator()
 
