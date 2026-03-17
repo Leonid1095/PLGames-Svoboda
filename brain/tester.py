@@ -347,6 +347,17 @@ class ConnectionTester:
         """Start separate zapret2 instance for testing."""
         self._stop_shadow_zapret()
 
+        # Kill any leftover winws2 (permanent or crashed shadow)
+        if self._is_windows:
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "winws2.exe"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                )
+                time.sleep(0.5)
+            except Exception:
+                pass
+
         cmd = [str(self._zapret_bin)]
 
         if self._is_windows:

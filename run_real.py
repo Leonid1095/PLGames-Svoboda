@@ -228,10 +228,13 @@ def _start_permanent_zapret(
         base = str(binary.parent)
         lib = lua_dir / "zapret-lib.lua"
         antidpi = lua_dir / "zapret-antidpi.lua"
+        auto = lua_dir / "zapret-auto.lua"
         if lib.exists():
             cmd.append(f"--lua-init=@{os.path.relpath(str(lib), base)}")
         if antidpi.exists():
             cmd.append(f"--lua-init=@{os.path.relpath(str(antidpi), base)}")
+        if auto.exists():
+            cmd.append(f"--lua-init=@{os.path.relpath(str(auto), base)}")
 
     # Hostlist: copy to binary dir to avoid path issues
     if hostlist and hostlist.exists():
@@ -260,9 +263,10 @@ def _start_permanent_zapret(
         "--filter-tcp=443",
         "--filter-l7=tls",
         "--hostlist-exclude-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com",
+        "--in-range=-s34228",  # needed for circular conntrack
     ])
     # Circular orchestrator: auto-failover between strategies
-    cmd.append("--lua-desync=circular:fails=3")
+    cmd.append("--lua-desync=circular")
     # Strategy 1: user's tested strategy (primary)
     for call in flags:
         cmd.append(f"--lua-desync={call}:strategy=1")

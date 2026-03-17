@@ -62,6 +62,14 @@ ISP_SEED_STRATEGIES: dict[str, list[list[str]]] = {
     "tattelecom": [
         ["fakedsplit:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4", "multidisorder:pos=2"],
     ],
+    "er-telecom": [
+        # Proven on AS42116: stateful DPI, fake=0.000, multidisorder+seqovl works
+        ["multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000"],
+        ["multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000", "multidisorder:pos=1,midsld"],
+    ],
+    "ttk": [
+        ["fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5", "multisplit:pos=midsld"],
+    ],
 }
 
 # Маппинг ASN → имя провайдера
@@ -84,6 +92,15 @@ ASN_TO_ISP: dict[str, str] = {
     "AS8790": "beeline",
     "AS41330": "beeline",
     "AS15974": "tattelecom",
+    # ER-Telecom (Dom.ru)
+    "AS42116": "er-telecom",
+    "AS34533": "er-telecom",
+    "AS29497": "er-telecom",
+    # TTK
+    "AS20485": "ttk",
+    "AS15835": "ttk",
+    # NetByNet
+    "AS12714": "netbynet",
 }
 
 
