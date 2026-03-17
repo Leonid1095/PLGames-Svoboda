@@ -977,6 +977,62 @@ def main():
                 needs_reevolve = True
                 print(f"  [!] {host}: {streak_fail} consecutive failures")
 
+        # ── Per-host problem solving (without breaking working hosts) ──
+        # If some hosts fail but overall health is OK, try to fix them
+        persistent_fails = [
+            h for h in hosts
+            if health["hosts"].get(h, {}).get("streak_fail", 0) >= 3
+            and not needs_reevolve
+        ]
+        if persistent_fails and not needs_reevolve:
+            ui.separator()
+            ui.warn(f"Persistent failures: {', '.join(persistent_fails)}")
+            ui.info("Trying per-host AI analysis (won't affect working sites)...")
+
+            from brain.block_classifier import BlockageClassifier
+            from brain.failure_analyzer import FailureAnalyzer
+
+            classifier = BlockageClassifier(timeout=5)
+            analyzer = FailureAnalyzer()
+
+            for fail_host in persistent_fails[:2]:  # max 2 hosts per cycle
+                analysis = classifier.classify(fail_host)
+                ui.block_status(fail_host, analysis.block_type, analysis.confidence, analysis.evidence)
+
+                # AI analysis
+                report = analyzer.analyze(
+                    flags=best.flags if best else [],
+                    fitness=0.0,
+                    host_results={fail_host: {"successes": 0, "total": 3, "error_types": [analysis.block_type.lower()]}},
+                    tspu_profile=tspu_profile,
+                )
+                ui.info(f"AI: {report.root_cause} — {report.explanation[:100]}")
+
+                # Record for AI learning
+                ai_feedback.record_test(
+                    [f"per_host_fail:{fail_host}"], 0.0,
+                    failure_mode=analysis.block_type.lower(),
+                )
+
+                # Try recommended strategies for this specific block type
+                if analysis.recommended_strategies:
+                    for rec_strat in analysis.recommended_strategies[:1]:
+                        ui.info(f"Testing: {' | '.join(rec_strat)}")
+                        fit = tester.test_strategy(rec_strat)
+                        ai_feedback.record_test(rec_strat, fit, "ok" if fit > 0.3 else "timeout")
+                        if fit > 0.3:
+                            ui.ok(f"Found fix for {fail_host}! (fitness={fit:.3f})")
+                            # Report to server
+                            if sync.is_configured:
+                                sync.vote_strategy(rec_strat, success=True, fitness=fit, isp=isp_name)
+                            break
+
+                # Report observations to server
+                if sync.is_configured:
+                    sync.sync_now()
+
+            ui.separator()
+
         if needs_reevolve:
             from brain.block_classifier import BlockageClassifier
             from brain.failure_analyzer import FailureAnalyzer
