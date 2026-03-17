@@ -66,12 +66,32 @@ echo.
 net session >nul 2>&1
 if %errorLevel% neq 0 (
     echo  [!] %MSG_ADMIN%
-    echo  [!] %MSG_RESTARTING%
     echo.
+    if %LANG_RU%==1 (
+        echo  [1] Перезапустить с правами администратора ^(рекомендуется^)
+        echo  [2] Режим SOCKS прокси ^(без прав администратора^)
+    ) else (
+        echo  [1] Restart as Administrator ^(recommended^)
+        echo  [2] SOCKS proxy mode ^(no admin rights needed^)
+    )
+    echo.
+    set /p ADMIN_CHOICE="  Choose [1/2]: "
+    if "%ADMIN_CHOICE%"=="2" goto :socks_mode
     powershell -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b 0
 )
 echo  [OK] Administrator
+goto :admin_ok
+
+:socks_mode
+echo.
+echo  Starting SOCKS proxy mode (no WinDivert needed)...
+echo  Configure your browser: SOCKS5 proxy localhost:1080
+echo.
+python -c "from brain.socks_proxy import DesyncSocksProxy; from pathlib import Path; p=DesyncSocksProxy({}); p.load_hostlist(Path('hostlist.txt')); p.start(); import time; [time.sleep(1) for _ in iter(int,1)]"
+goto :done
+
+:admin_ok
 
 :: ─── Kill leftover winws2 from previous run ─────────────────────
 taskkill /F /IM winws2.exe >nul 2>&1
