@@ -560,9 +560,150 @@ def main():
             if s not in classifier_strategies:
                 classifier_strategies.append(s)
 
-    # ─── Quick start: try community → cache → enum → GA ────────────
+    # ─── Initialize tester ──────────────────────────────────────────
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
     dpi_type = tspu_profile.dpi_type if tspu_profile else "unknown"
+
+    # ─── Try AI Engine (agentic mode) ────────────────────────────────
+    _ai_engine_used = False
+    if ai.is_available and len(blocked) > 0:
+        try:
+            from brain.ai_engine import AIEngine, build_engine_context
+            from brain.host_solver import HostSolver
+
+            # Build tool handlers
+            def _tool_run_enumerator(hosts=None, forbid_genes=None, stop_on_fitness=0.5):
+                from brain.enumerator import StrategyEnumerator
+                excluded = set(forbid_genes or []) | ai_feedback.get_excluded_functions()
+                enum = StrategyEnumerator(excluded_functions=excluded)
+                best_fit, best_flags, best_name = 0.0, [], ""
+                for s in enum.strategies:
+                    if not _running:
+                        break
+                    fit = tester.test_strategy(s["flags"])
+                    ai_feedback.record_test(s["flags"], fit, "ok" if fit > 0.3 else "timeout")
+                    if fit > best_fit:
+                        best_fit, best_flags, best_name = fit, s["flags"], s["name"]
+                    if fit >= stop_on_fitness:
+                        break
+                return {"strategy": " | ".join(best_flags), "fitness": best_fit, "name": best_name}
+
+            def _tool_per_host_solver(host=""):
+                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                result = solver.solve(host)
+                if result:
+                    return {"strategy": " | ".join(result["flags"]), "fitness": result["fitness"]}
+                return {"strategy": "", "fitness": 0.0}
+
+            def _tool_test_strategy(strategy="", hosts=None):
+                flags = [f.strip() for f in strategy.split("|")]
+                fit = tester.test_strategy(flags)
+                verify = _quick_connectivity_check(hosts or list(blocked.keys()))
+                return {"fitness": fit, "host_status": {h: ok for h, ok in verify.items()}}
+
+            def _tool_get_block_analysis(host=""):
+                analysis = classifier.classify(host)
+                return {
+                    "block_type": analysis.block_type,
+                    "confidence": analysis.confidence,
+                    "evidence": analysis.evidence,
+                }
+
+            def _tool_apply_strategy(strategy="", extra_profiles=None):
+                global _active_process
+                flags = [f.strip() for f in strategy.split("|")]
+                _active_process = _start_permanent_zapret(
+                    zapret_bin, lua_dir, flags, hostlist,
+                    _tspu_recommended_ttl, config,
+                )
+                time.sleep(2)
+                verify = _quick_connectivity_check(list(blocked.keys()))
+                return {"success": _active_process is not None, "host_status": {h: ok for h, ok in verify.items()}}
+
+            # Build context
+            tspu_dict = {}
+            if tspu_profile:
+                tspu_dict = {
+                    "dpi_distance": tspu_profile.dpi_hop_distance,
+                    "dpi_type": tspu_profile.dpi_type,
+                    "recommended_ttl": tspu_profile.recommended_ttl,
+                }
+
+            block_analysis_dict = {
+                h: {"block_type": r.block_type, "confidence": r.confidence, "evidence": r.evidence}
+                for h, r in blocked.items()
+            }
+
+            context = build_engine_context(
+                isp=isp_name,
+                asn=asn if 'asn' in dir() else "",
+                tspu_profile=tspu_dict,
+                block_analysis=block_analysis_dict,
+                test_history=[r.to_dict() for r in ai_feedback.history[-10:]],
+                excluded_functions=list(ai_feedback.get_excluded_functions()),
+            )
+
+            engine = AIEngine(
+                config=config,
+                ai_chat_fn=ai._chat,
+                max_iterations=8,
+            )
+            engine.register_tool("run_enumerator", _tool_run_enumerator)
+            engine.register_tool("run_per_host_solver", _tool_per_host_solver)
+            engine.register_tool("test_strategy", _tool_test_strategy)
+            engine.register_tool("get_block_analysis", _tool_get_block_analysis)
+            engine.register_tool("apply_strategy", _tool_apply_strategy)
+            engine.register_tool("done", lambda **kw: kw)
+
+            print("\n  AI Engine: autonomous mode...")
+            result = engine.run(context)
+
+            if result.get("applied_strategy") and _active_process:
+                _ai_engine_used = True
+                working = sum(1 for ok in result.get("host_status", {}).values() if ok)
+                total_h = len(hosts)
+                for host, ok in result.get("host_status", {}).items():
+                    print(f"    {host}: {'OK' if ok else 'FAIL'}")
+
+                if working > 0:
+                    strategy_str = result["applied_strategy"]
+                    ui.bypass_active(working, total_h, strategy_str,
+                                     tier.get_status_line(), donate.page_url)
+
+                    # Solve remaining fails
+                    failed = [h for h, ok in result.get("host_status", {}).items() if not ok]
+                    for fh in result.get("per_host_strategies", {}):
+                        print(f"    {fh}: per-host strategy applied")
+                        failed = [h for h in failed if h != fh]
+
+                    print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
+
+                    # Enter watchdog loop
+                    watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
+                    while _running:
+                        for _ in range(watchdog_interval):
+                            if not _running:
+                                break
+                            time.sleep(1)
+                        if not _running:
+                            break
+                        now = datetime.now().strftime("%H:%M")
+                        host_statuses = []
+                        for host in hosts:
+                            r = _curl_check_one(host, timeout=8)
+                            host_statuses.append((host, r["success"], r["latency_ms"]))
+                        health = analytics.get_all_hosts_health(hosts, minutes=10)
+                        ui.monitor_line(now, host_statuses, health["overall_rate"])
+                    if _active_process:
+                        _stop_permanent_zapret(_active_process)
+                    analytics.close()
+                    return
+        except Exception as exc:
+            logger.warning("AI Engine failed, falling back to linear pipeline: %s", exc)
+            print(f"  [!] AI Engine: {exc}")
+            print("  Falling back to standard mode...\n")
+
+    # ─── Fallback: community → cache → enum → GA ────────────────────
 
     # Step 1: Community instant strategy
     if sync.is_configured:
