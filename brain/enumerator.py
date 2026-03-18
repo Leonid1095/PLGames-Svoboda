@@ -197,6 +197,33 @@ KNOWN_STRATEGIES: list[dict] = [
         ],
         "desc": "Chrome-like window + split with padding",
     },
+
+    # ── Tier 7: HTTP/2 stream kill bypass (Telegram, Discord streams) ──
+    {
+        "name": "wssize1_multidisorder",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "Tiny TCP window breaks H2 stream DPI + disorder",
+    },
+    {
+        "name": "wssize1_multisplit",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000",
+        ],
+        "desc": "Tiny TCP window + split (H2 stream kill bypass)",
+    },
+    {
+        "name": "wssize1_disorder_fake",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "fake:blob=fake_default_tls:ip_ttl=4:tcp_md5:repeats=4",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "Tiny window + fake + disorder (max anti-H2-kill)",
+    },
 ]
 
 
