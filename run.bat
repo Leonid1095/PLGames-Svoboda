@@ -133,19 +133,25 @@ if not exist "config.json" (
 if exist ".git" (
     git --version >nul 2>&1
     if %errorLevel% equ 0 (
-        echo  %MSG_SELF_UPD%
+        echo|set /p="  %MSG_SELF_UPD% "
         git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 fetch --depth 1 origin main >nul 2>&1
+        if %errorLevel% neq 0 (
+            echo [SKIP] no connection
+            goto :skip_self_update
+        )
         for /f %%h in ('git rev-parse HEAD 2^>nul') do set SV_LOCAL=%%h
         for /f %%h in ('git rev-parse origin/main 2^>nul') do set SV_REMOTE=%%h
         if not "%SV_LOCAL%"=="%SV_REMOTE%" (
-            echo  [!] %MSG_SELF_NEW%
+            echo.
+            echo|set /p="  Downloading update... "
             git pull --ff-only origin main >nul 2>&1
-            echo  [OK] Svoboda updated
+            echo [OK]
         ) else (
-            echo  [OK] %MSG_SELF_OK%
+            echo [OK]
         )
     )
 )
+:skip_self_update
 
 :: ─── zapret2 binaries ─────────────────────────────────────────
 set ZAPRET_DIR=zapret2
@@ -210,17 +216,23 @@ pause
 exit /b 1
 
 :zapret_update
-echo  %MSG_ZAPRET_UPD%
+echo|set /p="  %MSG_ZAPRET_UPD% "
 pushd "%ZAPRET_DIR%"
-git fetch --depth 1 origin main >nul 2>&1
+git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 fetch --depth 1 origin main >nul 2>&1
+if %errorLevel% neq 0 (
+    echo [SKIP]
+    popd
+    goto :zapret_ok
+)
 for /f %%h in ('git rev-parse HEAD') do set LOCAL_HEAD=%%h
 for /f %%h in ('git rev-parse origin/main') do set REMOTE_HEAD=%%h
 if not "%LOCAL_HEAD%"=="%REMOTE_HEAD%" (
-    echo  [!] %MSG_ZAPRET_NEW%
+    echo.
+    echo|set /p="  Downloading zapret2 update... "
     git reset --hard origin/main >nul 2>&1
-    echo  [OK] zapret2 updated
+    echo [OK]
 ) else (
-    echo  [OK] %MSG_ZAPRET_OK%
+    echo [OK]
 )
 popd
 
