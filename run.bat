@@ -134,7 +134,7 @@ if exist ".git" (
     git --version >nul 2>&1
     if %errorLevel% equ 0 (
         echo  %MSG_SELF_UPD%
-        git fetch --depth 1 origin main >nul 2>&1
+        git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 fetch --depth 1 origin main >nul 2>&1
         for /f %%h in ('git rev-parse HEAD 2^>nul') do set SV_LOCAL=%%h
         for /f %%h in ('git rev-parse origin/main 2^>nul') do set SV_REMOTE=%%h
         if not "%SV_LOCAL%"=="%SV_REMOTE%" (

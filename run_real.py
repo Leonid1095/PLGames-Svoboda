@@ -741,7 +741,6 @@ def main():
                                 result = solver.solve(fh)
                                 if result:
                                     print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
-                                    # Restart permanent with extra profile
                                     extra = solver.build_extra_profiles(lua_dir)
                                     if extra:
                                         _stop_permanent_zapret(_active_process)
@@ -755,6 +754,32 @@ def main():
                                         print(f"    {fh}: {'OK' if r['success'] else 'FAIL'}")
                                 else:
                                     print(f"  [!] No strategy found for {fh}")
+
+                        # Launch ByeDPI SOCKS5 for remaining failed hosts
+                        still_failed = [h for h, ok_v in _quick_connectivity_check(hosts).items() if not ok_v]
+                        if still_failed and _running:
+                            try:
+                                from brain.byedpi import ByeDPIFallback
+                                _byedpi = ByeDPIFallback(config, base_dir=str(BASE_DIR))
+                                if _byedpi.find_binary() or _byedpi.download_binary():
+                                    print(f"\n  Starting SOCKS5 proxy for: {', '.join(still_failed)}...")
+                                    if _byedpi.start(block_type="sni_filtering"):
+                                        print(f"  [OK] ByeDPI SOCKS5 on {_byedpi.proxy_url}")
+                                        # Auto-configure Telegram if it's in failed list
+                                        tg_hosts = [h for h in still_failed if "telegram" in h]
+                                        if tg_hosts:
+                                            if _byedpi.configure_telegram_proxy():
+                                                print("  [OK] Telegram configured with SOCKS5 proxy")
+                                            else:
+                                                print(f"  [!] Configure Telegram manually: Settings → Data → Proxy → SOCKS5 {_byedpi._host}:{_byedpi._port}")
+                                        # Show instructions for other apps
+                                        discord_hosts = [h for h in still_failed if "discord" in h]
+                                        if discord_hosts:
+                                            print(f"  [!] Discord app: Settings → Advanced → SOCKS5 {_byedpi._host}:{_byedpi._port}")
+                                    else:
+                                        print("  [!] ByeDPI failed to start")
+                            except Exception as exc:
+                                logger.debug("ByeDPI launch failed: %s", exc)
 
                         # Watchdog loop
                         watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60

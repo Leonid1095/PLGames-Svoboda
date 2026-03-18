@@ -344,3 +344,74 @@ class ByeDPIFallback:
             "proxy_url": self.proxy_url,
             "pid": self._process.pid if self._process else None,
         }
+
+    # ─── App-specific proxy configuration ──────────────────────────────
+
+    def find_telegram_exe(self) -> Optional[Path]:
+        """Find Telegram Desktop executable."""
+        if not self._is_windows:
+            return None
+        candidates = [
+            Path(os.environ.get("APPDATA", "")) / "Telegram Desktop" / "Telegram.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Telegram Desktop" / "Telegram.exe",
+            Path("C:/Users") / os.environ.get("USERNAME", "") / "AppData" / "Roaming" / "Telegram Desktop" / "Telegram.exe",
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        # Search in Program Files
+        for pf in [Path("C:/Program Files"), Path("C:/Program Files (x86)")]:
+            tg = pf / "Telegram Desktop" / "Telegram.exe"
+            if tg.exists():
+                return tg
+        return None
+
+    def configure_telegram_proxy(self) -> bool:
+        """Configure Telegram Desktop to use ByeDPI SOCKS5 proxy.
+
+        Telegram supports -proxy flag for SOCKS5.
+        We kill existing Telegram and restart with proxy configured.
+        """
+        tg_exe = self.find_telegram_exe()
+        if not tg_exe:
+            logger.debug("Telegram Desktop not found")
+            return False
+
+        # Kill existing Telegram
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "Telegram.exe"],
+                capture_output=True, timeout=5,
+            )
+            time.sleep(1)
+        except Exception:
+            pass
+
+        # Start Telegram with SOCKS5 proxy
+        # Telegram Desktop supports -proxy socks5://host:port
+        try:
+            subprocess.Popen(
+                [str(tg_exe), "-proxy", f"socks5://{self._host}:{self._port}"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if self._is_windows else 0,
+            )
+            logger.info("Telegram started with SOCKS5 proxy %s:%d", self._host, self._port)
+            return True
+        except Exception as exc:
+            logger.warning("Failed to start Telegram with proxy: %s", exc)
+            return False
+
+    def find_discord_exe(self) -> Optional[Path]:
+        """Find Discord executable."""
+        if not self._is_windows:
+            return None
+        local = Path(os.environ.get("LOCALAPPDATA", ""))
+        discord_dir = local / "Discord"
+        if discord_dir.exists():
+            # Find latest version
+            for d in sorted(discord_dir.glob("app-*"), reverse=True):
+                exe = d / "Discord.exe"
+                if exe.exists():
+                    return exe
+        return None
