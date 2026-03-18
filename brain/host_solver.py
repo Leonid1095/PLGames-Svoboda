@@ -112,8 +112,8 @@ class HostSolver:
                 if any(f.split(":")[0] in excluded for f in flags):
                     continue
 
-            # Test this strategy
-            fitness = self._tester.test_strategy(flags)
+            # Test this strategy against ONLY the target host
+            fitness = self._tester.test_strategy_single_host(flags, host)
 
             if on_progress:
                 on_progress(i + 1, len(candidates), name, fitness)

@@ -133,6 +133,33 @@ class ConnectionTester:
             return self._test_mock(flags)
         return self._test_real(flags)
 
+    def test_strategy_single_host(self, flags: list[str], host: str) -> float:
+        """Test strategy against ONE specific host only.
+
+        Used by per-host solver to find strategy for a single blocked host
+        without testing all other hosts.
+
+        Returns 1.0 if host responds OK, 0.0 otherwise.
+        """
+        if self.mock:
+            return self._test_mock(flags)
+
+        proc = self._start_shadow_zapret(flags)
+        if not proc:
+            return 0.0
+
+        try:
+            timeout = self._evo_timeout
+            r = self._curl_test(host, timeout_override=timeout)
+            if r.success:
+                logger.info("Single-host test %s: OK (%dms)", host, r.latency_ms)
+                return 1.0
+            else:
+                logger.debug("Single-host test %s: FAIL (%s)", host, r.error_type)
+                return 0.0
+        finally:
+            self._stop_shadow_zapret(proc)
+
     # ─── Mock ──────────────────────────────────────────────────────────────
 
     def _test_mock(self, flags: list[str]) -> float:
