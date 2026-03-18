@@ -592,7 +592,7 @@ def main():
                 solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
                 result = solver.solve(host)
                 if result:
-                    return {"strategy": " | ".join(result["flags"]), "fitness": result["fitness"]}
+                    return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
                 return {"strategy": "", "fitness": 0.0}
 
             def _tool_test_strategy(strategy="", hosts=None):
@@ -740,7 +740,7 @@ def main():
                                 print(f"\n  Solving: {fh}...")
                                 result = solver.solve(fh)
                                 if result:
-                                    print(f"  [OK] Found strategy for {fh} (fitness={result['fitness']:.3f})")
+                                    print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
                                     # Restart permanent with extra profile
                                     extra = solver.build_extra_profiles(lua_dir)
                                     if extra:
@@ -947,7 +947,7 @@ def main():
                         print(f"\n  Solving: {fh}...")
                         result = solver.solve(fh)
                         if result:
-                            print(f"  [OK] Found strategy for {fh} (fitness={result['fitness']:.3f})")
+                            print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
                             extra = solver.build_extra_profiles(lua_dir)
                             if extra:
                                 _stop_permanent_zapret(_active_process)
