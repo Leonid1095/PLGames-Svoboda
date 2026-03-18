@@ -732,8 +732,15 @@ def main():
                         # Immediately solve failed hosts
                         failed_hosts = [h for h, ok_v in verify.items() if not ok_v]
                         if failed_hosts and _running:
+                            # Must stop permanent winws2 so shadow can use same ports
+                            print(f"\n  {len(failed_hosts)} host(s) still blocked, searching solutions...")
+                            _stop_permanent_zapret(_active_process)
+                            _active_process = None
+                            time.sleep(1)
+
                             from brain.host_solver import HostSolver
                             solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                            any_solved = False
                             for fh in failed_hosts:
                                 if not _running:
                                     break
@@ -741,19 +748,18 @@ def main():
                                 result = solver.solve(fh)
                                 if result:
                                     print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
-                                    extra = solver.build_extra_profiles(lua_dir)
-                                    if extra:
-                                        _stop_permanent_zapret(_active_process)
-                                        _active_process = _start_permanent_zapret(
-                                            zapret_bin, lua_dir, community["flags"],
-                                            hostlist, _tspu_recommended_ttl, config,
-                                            extra_profiles=extra,
-                                        )
-                                        time.sleep(2)
-                                        r = _curl_check_one(fh, timeout=8)
-                                        print(f"    {fh}: {'OK' if r['success'] else 'FAIL'}")
+                                    any_solved = True
                                 else:
                                     print(f"  [!] No strategy found for {fh}")
+
+                            # Restart permanent with main + per-host strategies
+                            extra = solver.build_extra_profiles(lua_dir) if any_solved else []
+                            _active_process = _start_permanent_zapret(
+                                zapret_bin, lua_dir, community["flags"],
+                                hostlist, _tspu_recommended_ttl, config,
+                                extra_profiles=extra,
+                            )
+                            time.sleep(2)
 
                         # Launch ByeDPI SOCKS5 for remaining failed hosts
                         still_failed = [h for h, ok_v in _quick_connectivity_check(hosts).items() if not ok_v]
