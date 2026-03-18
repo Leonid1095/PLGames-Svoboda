@@ -111,8 +111,8 @@ class ConnectionTester:
         self.hosts_h2: list[str] = config.get("test_hosts_h2", ["youtube.com"])
         self.hosts_ws: list[str] = config.get("test_hosts_websocket", ["gateway.discord.gg"])
         self.trials: int = config.get("test_trials", 3)
-        self.timeout: int = config.get("test_timeout", 5)
-        self._evo_timeout: int = min(self.timeout, 3)  # shorter timeout during evolution
+        self.timeout: int = config.get("test_timeout", 8)
+        self._evo_timeout: int = min(self.timeout, 5)  # shorter timeout during evolution
         self._evo_trials: int = 1  # 1 trial per host during evolution (fast screening)
         self._base_dir = Path(config.get("_base_dir", "."))
         self._is_windows = platform.system() == "Windows"

@@ -85,10 +85,7 @@ goto :admin_ok
 
 :socks_mode
 echo.
-echo  Starting SOCKS proxy mode (no WinDivert needed)...
-echo  Configure your browser: SOCKS5 proxy localhost:1080
-echo.
-python -c "from brain.socks_proxy import DesyncSocksProxy; from pathlib import Path; p=DesyncSocksProxy({}); p.load_hostlist(Path('hostlist.txt')); p.start(); import time; [time.sleep(1) for _ in iter(int,1)]"
+python run_byedpi.py
 goto :done
 
 :admin_ok
