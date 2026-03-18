@@ -202,6 +202,7 @@ def _start_permanent_zapret(
     binary: Path, lua_dir: Optional[Path], flags: list[str],
     hostlist: Optional[Path] = None, tspu_ttl: int = 0,
     config: Optional[dict] = None,
+    extra_profiles: list[str] = None,
 ) -> Optional[subprocess.Popen]:
     """Start winws2/nfqws2 permanently with the given strategy.
 
@@ -327,6 +328,10 @@ def _start_permanent_zapret(
         "--payload=quic_initial",
         f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=11",
     ])
+
+    # Add extra per-host profiles if any
+    if extra_profiles:
+        cmd.extend(extra_profiles)
 
     log = logging.getLogger("svoboda")
     log.info("Permanent winws2 cmd: %s", " ".join(cmd))
@@ -592,6 +597,34 @@ def main():
                     if working > 0:
                         ui.bypass_active(working, total_h, " | ".join(community["flags"]),
                                          tier.get_status_line(), donate.page_url)
+
+                        # Immediately solve failed hosts
+                        failed_hosts = [h for h, ok_v in verify.items() if not ok_v]
+                        if failed_hosts and _running:
+                            from brain.host_solver import HostSolver
+                            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                            for fh in failed_hosts:
+                                if not _running:
+                                    break
+                                print(f"\n  Solving: {fh}...")
+                                result = solver.solve_host(fh)
+                                if result:
+                                    print(f"  [OK] Found strategy for {fh} (fitness={result['fitness']:.3f})")
+                                    # Restart permanent with extra profile
+                                    extra = solver.build_extra_profiles(lua_dir)
+                                    if extra:
+                                        _stop_permanent_zapret(_active_process)
+                                        _active_process = _start_permanent_zapret(
+                                            zapret_bin, lua_dir, community["flags"],
+                                            hostlist, _tspu_recommended_ttl, config,
+                                            extra_profiles=extra,
+                                        )
+                                        time.sleep(2)
+                                        r = _curl_check_one(fh, timeout=8)
+                                        print(f"    {fh}: {'OK' if r['success'] else 'FAIL'}")
+                                else:
+                                    print(f"  [!] No strategy found for {fh}")
+
                         # Watchdog loop
                         watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
                         while _running:
@@ -771,6 +804,33 @@ def main():
                 print(f"\n  Strategy: {' | '.join(best_flags)}")
                 print(f"  Tier:     {tier.get_status_line()}")
                 print(f"  Donate:   {donate.page_url}")
+
+                # Immediately solve failed hosts
+                failed_hosts = [h for h, ok in verify.items() if not ok]
+                if failed_hosts and _running:
+                    from brain.host_solver import HostSolver
+                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                    for fh in failed_hosts:
+                        if not _running:
+                            break
+                        print(f"\n  Solving: {fh}...")
+                        result = solver.solve_host(fh)
+                        if result:
+                            print(f"  [OK] Found strategy for {fh} (fitness={result['fitness']:.3f})")
+                            extra = solver.build_extra_profiles(lua_dir)
+                            if extra:
+                                _stop_permanent_zapret(_active_process)
+                                _active_process = _start_permanent_zapret(
+                                    zapret_bin, lua_dir, best_flags,
+                                    hostlist, _tspu_recommended_ttl, config,
+                                    extra_profiles=extra,
+                                )
+                                time.sleep(2)
+                                r = _curl_check_one(fh, timeout=8)
+                                print(f"    {fh}: {'OK' if r['success'] else 'FAIL'}")
+                        else:
+                            print(f"  [!] No strategy found for {fh}")
+
                 print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
 
                 # Watchdog for enumerated strategy
