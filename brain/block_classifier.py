@@ -57,6 +57,18 @@ class BlockAnalysis:
     evidence: list[str] = field(default_factory=list)
     recommended_strategies: list[list[str]] = field(default_factory=list)
     recommended_params: dict = field(default_factory=dict)
+    # Packet-level events for AI reasoning
+    packet_events: list[dict] = field(default_factory=list)
+
+    def to_ai_context(self) -> dict:
+        """Structured data for AI Decision Engine."""
+        return {
+            "host": self.host,
+            "block_type": self.block_type,
+            "confidence": self.confidence,
+            "evidence": "; ".join(self.evidence),
+            "packet_events": self.packet_events,
+        }
 
 
 # Block types and their bypass strategies
@@ -387,8 +399,28 @@ class BlockageClassifier:
         self, probe: BlockProbe, block_type: str, confidence: float,
         evidence: list[str],
     ) -> BlockAnalysis:
-        """Create BlockAnalysis with recommended strategies."""
+        """Create BlockAnalysis with recommended strategies and packet events."""
         bt = BLOCK_TYPES.get(block_type, BLOCK_TYPES["TIMEOUT_SILENT"])
+
+        # Build packet events timeline for AI reasoning
+        events = []
+        if probe.tcp_connect_ok:
+            events.append({"type": "TCP_CONNECT", "ms": probe.tcp_connect_ms, "success": True})
+        else:
+            events.append({"type": "TCP_CONNECT", "ms": probe.tcp_connect_ms, "success": False})
+        if probe.tls_handshake_ok:
+            events.append({"type": "TLS_HANDSHAKE", "ms": probe.tls_handshake_ms, "success": True})
+        elif probe.ssl_error:
+            events.append({"type": "TLS_HANDSHAKE", "ms": probe.tls_handshake_ms, "success": False, "error": "ssl"})
+        if probe.rst_received:
+            events.append({"type": "RST_RECEIVED", "ms": probe.total_ms})
+        if probe.timeout:
+            events.append({"type": "TIMEOUT", "ms": probe.total_ms})
+        if probe.http_response_ok:
+            events.append({"type": "HTTP_RESPONSE", "code": probe.http_code, "ms": probe.ttfb_ms, "size": probe.content_size})
+        if probe.http_port80_ok:
+            events.append({"type": "HTTP_PORT80_OK"})
+
         return BlockAnalysis(
             host=probe.host,
             block_type=block_type,
@@ -396,6 +428,7 @@ class BlockageClassifier:
             evidence=evidence,
             recommended_strategies=bt.get("strategies", []),
             recommended_params=bt.get("params", {}),
+            packet_events=events,
         )
 
 
