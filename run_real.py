@@ -267,30 +267,20 @@ def _start_permanent_zapret(
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (all HTTPS except YouTube CDN)
-    # Uses circular orchestrator: auto-switches strategy on 3 failures
-    # strategy=1 is the tested/winning strategy
-    # strategy=2 is a fallback with different parameters
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--filter-tcp=443",
         "--filter-l7=tls",
         "--hostlist-exclude-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com",
-        "--in-range=-s34228",  # needed for circular conntrack
     ])
     # Traffic morphing: browser-like TCP window
     morph_calls = morpher.get_permanent_calls()
     for mc in morph_calls:
         cmd.append(f"--lua-desync={mc}")
-    # Circular orchestrator: auto-failover between strategies
-    cmd.append("--lua-desync=circular")
-    # Strategy 1: user's tested strategy (primary)
+    # Tested strategy (exactly what scored in enumeration/GA)
     morphed_flags = morpher.morph_strategy(flags)
     for call in morphed_flags:
-        cmd.append(f"--lua-desync={call}:strategy=1")
-    # Strategy 2: fallback with different split positions
-    cmd.append("--lua-desync=multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000:strategy=2")
-    # Strategy 3: aggressive seqovl
-    cmd.append("--lua-desync=multisplit:pos=1,midsld,endhost-1:seqovl=6:seqovl_pattern=0x1603030000:strategy=3")
+        cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2: TLS for YouTube CDN (googlevideo etc.)
@@ -607,7 +597,7 @@ def main():
                                 if not _running:
                                     break
                                 print(f"\n  Solving: {fh}...")
-                                result = solver.solve_host(fh)
+                                result = solver.solve(fh)
                                 if result:
                                     print(f"  [OK] Found strategy for {fh} (fitness={result['fitness']:.3f})")
                                     # Restart permanent with extra profile
@@ -814,7 +804,7 @@ def main():
                         if not _running:
                             break
                         print(f"\n  Solving: {fh}...")
-                        result = solver.solve_host(fh)
+                        result = solver.solve(fh)
                         if result:
                             print(f"  [OK] Found strategy for {fh} (fitness={result['fitness']:.3f})")
                             extra = solver.build_extra_profiles(lua_dir)
@@ -1310,8 +1300,8 @@ def _get_seeds(isp_name: str, ai: AIAdvisor) -> list[list[str]]:
     if ai.is_available:
         print("  Asking AI for strategy suggestions...")
         try:
-            _fb = ai_feedback if 'ai_feedback' in dir() else None
-            _tp = tspu_profile if 'tspu_profile' in dir() else None
+            _fb = ai_feedback
+            _tp = tspu_profile if tspu_profile else None
             ai_seeds = ai.suggest_strategies(
                 isp=isp_name, middlebox_type="unknown",
                 ai_feedback=_fb, tspu_profile=_tp,
@@ -1335,7 +1325,7 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name) -> Optional:
     print()
 
     # Get excluded functions from AI feedback (global)
-    _excluded = ai_feedback.get_excluded_functions() if 'ai_feedback' in dir() else set()
+    _excluded = ai_feedback.get_excluded_functions()
     ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded)
 
     def on_gen(gen, best):
