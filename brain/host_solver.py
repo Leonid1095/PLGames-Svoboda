@@ -88,55 +88,113 @@ class HostSolver:
         strategies_to_try: Optional[list[dict]] = None,
         on_progress: Optional[callable] = None,
     ) -> Optional[HostStrategy]:
-        """Try to find a working strategy for a specific host.
+        """Escalation ladder: try increasingly aggressive methods per host.
 
-        Tests strategies one by one against this specific host.
-        Returns first that works, or None.
+        Level 1: Known strategies (multisplit, multidisorder, etc.)
+        Level 2: Anti-H2 strategies (wssize=1 breaks HTTP/2 mux)
+        Level 3: ByeDPI SOCKS proxy for this host
+        Level 4: Report to user — needs VPN
+
+        Returns HostStrategy with method="zapret"|"byedpi"|None
         """
         if not self._tester:
             return None
 
         from brain.enumerator import KNOWN_STRATEGIES
 
+        # ── Level 1: Standard zapret2 strategies ──────────────────────
         candidates = strategies_to_try or KNOWN_STRATEGIES
+        logger.info("Solving %s: Level 1 — %d strategies", host, len(candidates))
 
-        logger.info("Solving %s: testing %d strategies", host, len(candidates))
+        best_fitness = 0.0
+        best_flags = []
+        best_name = ""
 
         for i, strat in enumerate(candidates):
             name = strat.get("name", f"strategy_{i}")
             flags = strat["flags"]
 
-            # Skip excluded functions
             if self._ai_feedback:
                 excluded = self._ai_feedback.get_excluded_functions()
                 if any(f.split(":")[0] in excluded for f in flags):
                     continue
 
-            # Test this strategy against ONLY the target host
             fitness = self._tester.test_strategy_single_host(flags, host)
 
             if on_progress:
                 on_progress(i + 1, len(candidates), name, fitness)
 
-            # Record for AI learning
             if self._ai_feedback:
                 self._ai_feedback.record_test(
                     flags, fitness,
                     failure_mode="ok" if fitness > 0.3 else "timeout",
                 )
 
+            if fitness > best_fitness:
+                best_fitness = fitness
+                best_flags = flags
+                best_name = name
+
+            if fitness > 0.8:  # Fast response — great, use it
+                break
+
+        if best_fitness > 0.3:
+            hs = HostStrategy(
+                host=host, flags=best_flags, fitness=best_fitness,
+                isp=isp, tested_at=time.time(),
+            )
+            self._strategies[host] = hs
+            self._save()
+            logger.info("Solved %s: Level 1 — %s (fitness=%.3f)", host, best_name, best_fitness)
+            return hs
+
+        # ── Level 2: Anti-H2 strategies (wssize=1) ───────────────────
+        logger.info("Solving %s: Level 2 — Anti-HTTP/2 strategies", host)
+        h2_strategies = [
+            {"name": "wssize1_disorder", "flags": ["wssize:wsize=1:scale=0", "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000"]},
+            {"name": "wssize1_split", "flags": ["wssize:wsize=1:scale=0", "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000"]},
+            {"name": "wssize1_simple", "flags": ["wssize:wsize=1:scale=0", "multidisorder:pos=midsld"]},
+            {"name": "wssize8_disorder", "flags": ["wssize:wsize=8:scale=0", "multidisorder:pos=1,midsld"]},
+            {"name": "wssize16_split", "flags": ["wssize:wsize=16:scale=0", "multisplit:pos=midsld"]},
+        ]
+
+        for strat in h2_strategies:
+            fitness = self._tester.test_strategy_single_host(strat["flags"], host)
+            logger.info("  Level 2: %s → fitness=%.3f", strat["name"], fitness)
             if fitness > 0.3:
-                # Found a working strategy for this host!
                 hs = HostStrategy(
-                    host=host, flags=flags, fitness=fitness,
+                    host=host, flags=strat["flags"], fitness=fitness,
                     isp=isp, tested_at=time.time(),
                 )
                 self._strategies[host] = hs
                 self._save()
-                logger.info("Solved %s: %s (fitness=%.3f)", host, name, fitness)
+                logger.info("Solved %s: Level 2 — %s (fitness=%.3f)", host, strat["name"], fitness)
                 return hs
 
-        logger.warning("Could not solve %s after %d strategies", host, len(candidates))
+        # ── Level 3: ByeDPI SOCKS proxy ──────────────────────────────
+        logger.info("Solving %s: Level 3 — ByeDPI SOCKS proxy", host)
+        try:
+            from brain.byedpi import ByeDPIFallback
+            base_dir = str(self._config.get("_base_dir", "."))
+            bdpi = ByeDPIFallback(self._config, base_dir=base_dir)
+            if bdpi.find_binary():
+                if bdpi.start(block_type="sni_filtering"):
+                    if bdpi.test_proxy(host, timeout=10):
+                        logger.info("Solved %s: Level 3 — ByeDPI SOCKS works!", host)
+                        hs = HostStrategy(
+                            host=host, flags=["__byedpi__"],
+                            fitness=0.7, isp=isp, tested_at=time.time(),
+                        )
+                        self._strategies[host] = hs
+                        self._save()
+                        # Don't stop ByeDPI — keep running for this host
+                        return hs
+                    bdpi.stop()
+        except Exception as exc:
+            logger.debug("Level 3 ByeDPI failed: %s", exc)
+
+        # ── Level 4: Cannot solve ─────────────────────────────────────
+        logger.warning("Could not solve %s after all levels", host)
         return None
 
     def build_extra_profiles(self) -> list[str]:
