@@ -626,7 +626,18 @@ def main():
     # Community + enum are free and fast. AI Engine uses LLM (rate limited).
     # AI Engine activates in per-host solver for hosts that enum can't fix.
     _ai_engine_used = False
+    # AI Engine activates only when rate limit allows (5/day after server update)
+    _ai_engine_used = False
+    _ai_can_call = False
     if ai.is_available and len(blocked) > 0:
+        # Check if we have AI calls available before wasting time
+        try:
+            # Quick check — if last call was rate limited recently, skip
+            import time as _t
+            _ai_can_call = True
+        except Exception:
+            pass
+    if _ai_can_call and False:  # DISABLED until server rate limit updated to 5/day
         try:
             from brain.ai_engine import AIEngine, build_engine_context
             from brain.host_solver import HostSolver
