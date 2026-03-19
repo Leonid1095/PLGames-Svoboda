@@ -847,8 +847,14 @@ def main():
                             except Exception as exc:
                                 logger.debug("ByeDPI launch failed: %s", exc)
 
-                        # Watchdog loop
+                        # Watchdog loop with hostlist-auto monitoring
                         watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
+                        _known_auto_hosts = set()
+                        # Load existing hostlist-auto entries
+                        _auto_path = Path(zapret_bin).parent / "hostlist-auto.txt" if zapret_bin else None
+                        if _auto_path and _auto_path.exists():
+                            _known_auto_hosts = set(_auto_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines())
+
                         while _running:
                             for _ in range(watchdog_interval):
                                 if not _running:
@@ -857,12 +863,30 @@ def main():
                             if not _running:
                                 break
                             now = datetime.now().strftime("%H:%M")
+
+                            # Check monitored hosts
                             host_statuses = []
                             for host in hosts:
-                                r = _curl_check_one(host, timeout=5)
+                                r = _curl_check_one(host, timeout=8)
                                 host_statuses.append((host, r["success"], r["latency_ms"]))
                             health = analytics.get_all_hosts_health(hosts, minutes=10)
                             ui.monitor_line(now, host_statuses, health["overall_rate"])
+
+                            # Monitor hostlist-auto for newly blocked domains
+                            if _auto_path and _auto_path.exists():
+                                try:
+                                    current_auto = set(_auto_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines())
+                                    new_domains = current_auto - _known_auto_hosts
+                                    if new_domains:
+                                        real_new = [d for d in new_domains if d.strip() and not d.startswith("#")]
+                                        if real_new:
+                                            logger.info("hostlist-auto detected %d new blocked domains: %s",
+                                                        len(real_new), ", ".join(list(real_new)[:5]))
+                                            print(f"  [{now}] New blocked domains detected: {', '.join(list(real_new)[:3])}")
+                                        _known_auto_hosts = current_auto
+                                except Exception:
+                                    pass
+
                             if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
                                 ui.warn("Health degraded, re-evolving...")
                                 _stop_permanent_zapret(_active_process)
