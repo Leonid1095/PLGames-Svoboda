@@ -216,11 +216,10 @@ def _start_permanent_zapret(
 
     if is_win:
         cmd.extend([
-            "--wf-tcp-out=80,443",
-            "--wf-udp-out=443",
+            "--wf-tcp-out=80,443,2053,2083,2087,2096,8443",  # +Discord media ports
+            "--wf-udp-out=443,50000-50100",  # +Discord voice/video ports
             # NOTE: --wf-tcp-in NOT needed! SYN-ACK/FIN/RST are captured
-            # automatically by WinDivert filter constructor. This enables
-            # autottl calibration without the CPU cost of capturing all data.
+            # automatically by WinDivert filter constructor.
         ])
     else:
         cmd.extend(["--qnum=200"])
@@ -262,6 +261,15 @@ def _start_permanent_zapret(
             cmd.append("--hostlist-auto=hostlist-auto.txt")
             cmd.append("--hostlist-auto-fail-threshold=3")
             cmd.append("--hostlist-auto-fail-time=60")
+            # Exclude Russian services (don't break yandex, vk, mail, etc.)
+            exclude_src = Path(config.get("_base_dir", ".")) / "list-exclude.txt" if config else None
+            if exclude_src and exclude_src.exists():
+                local_exclude = bin_dir / "list-exclude.txt"
+                try:
+                    shutil.copy2(str(exclude_src), str(local_exclude))
+                    cmd.append("--hostlist-exclude=list-exclude.txt")
+                except Exception:
+                    pass
         except Exception as exc:
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
@@ -308,7 +316,27 @@ def _start_permanent_zapret(
         cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 4: QUIC (YouTube video + other UDP/443)
+    # PROFILE 4: Discord media (TCP ports 2053-8443)
+    # ══════════════════════════════════════════════════════════════
+    cmd.extend([
+        "--new",
+        "--filter-tcp=2053,2083,2087,2096,8443",
+        "--filter-l7=tls",
+    ])
+    for call in flags:
+        cmd.append(f"--lua-desync={call}")
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 5: Discord voice (UDP 50000-50100)
+    # ══════════════════════════════════════════════════════════════
+    cmd.extend([
+        "--new",
+        "--filter-udp=50000-50100",
+        f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=12",
+    ])
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 6: QUIC (YouTube video + other UDP/443)
     # fake with known TTL from TSPU profiler
     # ══════════════════════════════════════════════════════════════
     quic_profile = [

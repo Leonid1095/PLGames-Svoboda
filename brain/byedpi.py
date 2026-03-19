@@ -424,9 +424,68 @@ class ByeDPIFallback:
         local = Path(os.environ.get("LOCALAPPDATA", ""))
         discord_dir = local / "Discord"
         if discord_dir.exists():
-            # Find latest version
             for d in sorted(discord_dir.glob("app-*"), reverse=True):
                 exe = d / "Discord.exe"
                 if exe.exists():
                     return exe
         return None
+
+    # ─── TG WS Proxy (WebSocket tunnel for Telegram) ──────────────
+
+    def start_tg_ws_proxy(self, port: int = 1081) -> bool:
+        """Start tg-ws-proxy for Telegram (WebSocket tunnel bypass).
+
+        tg-ws-proxy wraps MTProto in WSS — DPI sees HTTPS, not Telegram.
+        This is the most reliable method for Telegram when DPI blocks MTProto.
+
+        Install: pip install tg-ws-proxy
+        """
+        # Check if tg-ws-proxy is installed
+        try:
+            result = subprocess.run(
+                ["tg-ws-proxy", "--help"],
+                capture_output=True, timeout=5,
+            )
+            if result.returncode not in (0, 1):
+                raise FileNotFoundError
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            # Try to install
+            logger.info("Installing tg-ws-proxy...")
+            try:
+                subprocess.run(
+                    ["pip", "install", "tg-ws-proxy", "--quiet"],
+                    capture_output=True, timeout=60,
+                )
+            except Exception as exc:
+                logger.warning("Failed to install tg-ws-proxy: %s", exc)
+                return False
+
+        # Start tg-ws-proxy
+        try:
+            self._tg_ws_process = subprocess.Popen(
+                ["tg-ws-proxy", "--port", str(port), "--host", "127.0.0.1"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=subprocess.CREATE_NO_WINDOW if self._is_windows else 0,
+            )
+            time.sleep(1)
+            if self._tg_ws_process.poll() is not None:
+                logger.error("tg-ws-proxy failed to start")
+                return False
+
+            logger.info("tg-ws-proxy started on 127.0.0.1:%d (pid=%d)",
+                        port, self._tg_ws_process.pid)
+            return True
+        except Exception as exc:
+            logger.warning("tg-ws-proxy start failed: %s", exc)
+            return False
+
+    def stop_tg_ws_proxy(self) -> None:
+        """Stop tg-ws-proxy."""
+        if hasattr(self, '_tg_ws_process') and self._tg_ws_process:
+            try:
+                self._tg_ws_process.terminate()
+                self._tg_ws_process.wait(timeout=3)
+            except Exception:
+                pass
+            self._tg_ws_process = None
