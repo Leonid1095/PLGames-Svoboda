@@ -285,6 +285,9 @@ def _start_permanent_zapret(
     morph_calls = morpher.get_permanent_calls()
     for mc in morph_calls:
         cmd.append(f"--lua-desync={mc}")
+    # Anti-throttle: fake packet with TSPU TTL (same as YouTube CDN profile)
+    # This is what makes YouTube fast (150ms). Without it, DPI throttles.
+    cmd.append(f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6")
     # Tested strategy (exactly what scored in enumeration/GA)
     morphed_flags = morpher.morph_strategy(flags)
     for call in morphed_flags:
@@ -311,6 +314,7 @@ def _start_permanent_zapret(
         "--new",
         "--filter-tcp=80",
         "--filter-l7=http",
+        f"--lua-desync=fake:blob=fake_default_http:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
     ])
     for call in flags:
         cmd.append(f"--lua-desync={call}")
@@ -322,6 +326,7 @@ def _start_permanent_zapret(
         "--new",
         "--filter-tcp=2053,2083,2087,2096,8443",
         "--filter-l7=tls",
+        f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
     ])
     for call in flags:
         cmd.append(f"--lua-desync={call}")
