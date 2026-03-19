@@ -626,7 +626,7 @@ def main():
     # Community + enum are free and fast. AI Engine uses LLM (rate limited).
     # AI Engine activates in per-host solver for hosts that enum can't fix.
     _ai_engine_used = False
-    if False:  # AI Engine runs inside per-host solver, not here
+    if ai.is_available and len(blocked) > 0:
         try:
             from brain.ai_engine import AIEngine, build_engine_context
             from brain.host_solver import HostSolver
