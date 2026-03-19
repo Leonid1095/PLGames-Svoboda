@@ -120,13 +120,28 @@ class ByeDPIFallback:
 
             release = resp.json()
 
-            # Find correct asset
-            suffix = "win-x86_64.zip" if self._is_windows else "linux-x86_64.tar.gz"
+            # Find correct asset (ByeDPI uses various naming: ciadpi-*-win*, *x86_64*, *windows*)
             asset_url = None
+            asset_name_found = ""
             for asset in release.get("assets", []):
-                if suffix in asset["name"]:
-                    asset_url = asset["browser_download_url"]
-                    break
+                name = asset["name"].lower()
+                if self._is_windows:
+                    if ("win" in name or "windows" in name) and ("x86_64" in name or "x64" in name or "amd64" in name) and name.endswith(".zip"):
+                        asset_url = asset["browser_download_url"]
+                        asset_name_found = asset["name"]
+                        break
+                else:
+                    if ("linux" in name) and ("x86_64" in name or "x64" in name or "amd64" in name) and (".tar" in name or ".gz" in name):
+                        asset_url = asset["browser_download_url"]
+                        asset_name_found = asset["name"]
+                        break
+            # Fallback: try any Windows zip
+            if not asset_url and self._is_windows:
+                for asset in release.get("assets", []):
+                    if asset["name"].lower().endswith(".zip") and "win" in asset["name"].lower():
+                        asset_url = asset["browser_download_url"]
+                        asset_name_found = asset["name"]
+                        break
 
             if not asset_url:
                 logger.warning("No ByeDPI binary found for this platform")

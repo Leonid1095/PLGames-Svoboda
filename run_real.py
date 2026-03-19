@@ -311,13 +311,27 @@ def _start_permanent_zapret(
     # PROFILE 4: QUIC (YouTube video + other UDP/443)
     # fake with known TTL from TSPU profiler
     # ══════════════════════════════════════════════════════════════
-    cmd.extend([
+    quic_profile = [
         "--new",
         "--filter-udp=443",
         "--filter-l7=quic",
         "--payload=quic_initial",
         f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=11",
-    ])
+    ]
+    # Add Telegram IP ranges if ipset file exists
+    tg_ipset = Path(cwd) / ".." / ".." / ".." / "telegram_ips.txt"
+    if not tg_ipset.exists():
+        tg_ipset = Path(config.get("_base_dir", ".")) / "telegram_ips.txt" if config else None
+    if tg_ipset and tg_ipset.exists():
+        try:
+            import shutil
+            dest = Path(cwd) / "telegram_ips.txt"
+            if not dest.exists():
+                shutil.copy2(tg_ipset, dest)
+            quic_profile.insert(1, "--ipset=telegram_ips.txt")
+        except Exception:
+            pass
+    cmd.extend(quic_profile)
 
     # Add extra per-host profiles if any
     if extra_profiles:
@@ -495,10 +509,11 @@ def main():
         else:
             ui.warn("Server unavailable (offline mode)")
 
-    # ─── ISP Detection ────────────────────────────────────────────────
+    # ─── ISP Detection (use cache first, ipinfo.io may be blocked) ────
     ui.step("Detecting ISP...")
     profiler = ISPProfiler(config)
     isp_name = "unknown"
+    asn = "?"
     try:
         profile = profiler.detect()
         if profile:
@@ -508,7 +523,18 @@ def main():
         else:
             ui.warn("ISP detection failed (using generic strategies)")
     except Exception as exc:
-        ui.warn(f"ISP detection error: {exc}")
+        # ipinfo.io likely blocked by DPI — use cached profile
+        logger.debug("ISP detection error (DPI may block ipinfo.io): %s", exc)
+        try:
+            cached = profiler._load_cached_profile()
+            if cached:
+                isp_name = cached.get("isp_name", "unknown")
+                asn = cached.get("asn", "?")
+                ui.ok(f"ISP: {isp_name} ({asn}) (cached)")
+            else:
+                ui.warn("ISP unknown (will detect after bypass)")
+        except Exception:
+            ui.warn("ISP unknown (will detect after bypass)")
 
     # ─── Download blocklist ─────────────────────────────────────────
     print()
