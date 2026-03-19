@@ -633,9 +633,12 @@ def main():
             from brain.ai_engine import AIEngine, build_engine_context
             from brain.host_solver import HostSolver
 
-            # Build tool handlers
-            def _tool_run_enumerator(hosts=None, forbid_genes=None, stop_on_fitness=0.5):
+            # Build tool handlers (accept **kwargs for flexible AI tool calls)
+            def _tool_run_enumerator(hosts=None, forbid_genes=None, stop_on_fitness=0.5, **kwargs):
                 from brain.enumerator import StrategyEnumerator
+                # AI may send exclude_fake=True or other variants — handle gracefully
+                if kwargs.get("exclude_fake"):
+                    forbid_genes = (forbid_genes or []) + ["fake"]
                 excluded = set(forbid_genes or []) | ai_feedback.get_excluded_functions()
                 enum = StrategyEnumerator(excluded_functions=excluded)
                 best_fit, best_flags, best_name = 0.0, [], ""
@@ -650,20 +653,20 @@ def main():
                         break
                 return {"strategy": " | ".join(best_flags), "fitness": best_fit, "name": best_name}
 
-            def _tool_per_host_solver(host=""):
+            def _tool_per_host_solver(host="", **kwargs):
                 solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
                 result = solver.solve(host)
                 if result:
                     return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
                 return {"strategy": "", "fitness": 0.0}
 
-            def _tool_test_strategy(strategy="", hosts=None):
+            def _tool_test_strategy(strategy="", hosts=None, **kwargs):
                 flags = [f.strip() for f in strategy.split("|")]
                 fit = tester.test_strategy(flags)
                 verify = _quick_connectivity_check(hosts or list(blocked.keys()))
                 return {"fitness": fit, "host_status": {h: ok for h, ok in verify.items()}}
 
-            def _tool_get_block_analysis(host=""):
+            def _tool_get_block_analysis(host="", **kwargs):
                 analysis = classifier.classify(host)
                 return {
                     "block_type": analysis.block_type,
@@ -671,7 +674,7 @@ def main():
                     "evidence": analysis.evidence,
                 }
 
-            def _tool_apply_strategy(strategy="", extra_profiles=None):
+            def _tool_apply_strategy(strategy="", extra_profiles=None, **kwargs):
                 global _active_process
                 flags = [f.strip() for f in strategy.split("|")]
                 _active_process = _start_permanent_zapret(
@@ -774,11 +777,28 @@ def main():
             print(f"\n  Trying community strategy (fitness={community['fitness']:.3f}, {community['report_count']} users)...")
             verified = tester.test_strategy(community["flags"])
             if verified > 0.5:
-                print(f"  [OK] Community strategy works! (fitness={verified:.3f})")
+                # Accept community but check if throttled — if so, try enum for better
+                is_good_enough = verified > 0.7  # >0.7 = no throttling, skip enum
+                if is_good_enough:
+                    print(f"  [OK] Community strategy works! (fitness={verified:.3f})")
+                else:
+                    print(f"  [OK] Community strategy partial (fitness={verified:.3f}, searching better...)")
                 sync.vote_strategy(community["flags"], success=True, fitness=verified, isp=isp_name, dpi_type=dpi_type)
-                # Apply directly — skip everything
                 record = manager.save_strategy(community["flags"], verified, isp_name)
                 ai_feedback.record_test(community["flags"], verified, "ok")
+
+                if not is_good_enough:
+                    # Throttled — try enum for faster strategy before applying
+                    from brain.enumerator import StrategyEnumerator
+                    excluded = ai_feedback.get_excluded_functions()
+                    enum = StrategyEnumerator(excluded_functions=excluded)
+                    better = enum.enumerate(tester, threshold=verified + 0.05,
+                        on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
+                    if better and better["fitness"] > verified:
+                        print(f"  [OK] Found better: {better['name']} (fitness={better['fitness']:.3f})")
+                        community["flags"] = better["flags"]
+                        verified = better["fitness"]
+
                 _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community["flags"], hostlist, _tspu_recommended_ttl, config)
                 if _active_process:
                     time.sleep(2)
