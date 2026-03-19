@@ -302,25 +302,10 @@ class AIEngine:
             return ToolResult(tool=name, success=False, error=str(exc))
 
     def _fallback_run(self, context: dict) -> dict:
-        """Fallback when AI is unavailable — run enumerator directly."""
-        logger.info("AI Engine fallback: running enumerator directly")
-        handler = self._handlers.get("run_enumerator")
-        if handler:
-            try:
-                result = handler(
-                    hosts=context.get("blocked_hosts", []),
-                    forbid_genes=context.get("excluded_functions", []),
-                    stop_on_fitness=0.5,
-                )
-                return {
-                    "applied_strategy": result.get("strategy", ""),
-                    "per_host_strategies": {},
-                    "host_status": result.get("host_status", {}),
-                    "iterations": 1,
-                    "fallback": True,
-                }
-            except Exception as exc:
-                logger.error("Fallback enumerator failed: %s", exc)
+        """Fallback when AI is unavailable — skip, let community/enum handle it."""
+        logger.info("AI Engine fallback: skipping to community/enum pipeline")
+        # Don't run enumerator here — it duplicates work and doesn't apply strategy.
+        # Return empty result so main flow handles it.
 
         return {"applied_strategy": None, "iterations": 0, "fallback": True}
 
