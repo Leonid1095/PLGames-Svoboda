@@ -350,18 +350,22 @@ def _start_permanent_zapret(
 
 
 def _stop_permanent_zapret(proc: Optional[subprocess.Popen]) -> None:
-    """Stop permanent winws2/nfqws2 instance."""
-    if proc is None:
-        return
-    try:
-        proc.terminate()
+    """Stop permanent winws2/nfqws2 instance + force kill ALL winws2."""
+    if proc is not None:
         try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+            proc.terminate()
             proc.wait(timeout=3)
+        except Exception:
+            pass
+    # Force kill ALL winws2 instances to release WinDivert
+    try:
+        subprocess.run(
+            ["taskkill", "/F", "/IM", "winws2.exe"],
+            capture_output=True, timeout=5,
+        )
     except Exception:
         pass
+    time.sleep(1)  # wait for WinDivert driver to unload
 
 
 def _quick_connectivity_check(hosts: list[str], timeout: int = 5) -> dict[str, bool]:
