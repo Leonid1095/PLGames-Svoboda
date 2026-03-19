@@ -917,7 +917,7 @@ def main():
                                 from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
                                 excluded = ai_feedback.get_excluded_functions()
                                 enum = StrategyEnumerator(excluded_functions=excluded)
-                                new_result = enum.enumerate(tester, threshold=0.4,
+                                new_result = enum.enumerate(tester, threshold=0.65,
                                     on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                                 if new_result:
                                     community["flags"] = new_result["flags"]
@@ -1048,13 +1048,15 @@ def main():
     enumerator = StrategyEnumerator(strategies=priority_strategies, excluded_functions=excluded)
 
     def _enum_progress(i, total, name, fitness):
-        ui.enum_line(i, total, name, fitness, threshold=0.5)
+        ui.enum_line(i, total, name, fitness, threshold=0.65)
 
     def _enum_record(flags, fitness):
         ai_feedback.record_test(flags, fitness, "ok" if fitness > 0.3 else "timeout")
 
+    # Threshold 0.65: reject throttled strategies (fitness ~0.46-0.55)
+    # Forces enum to try all 33 including Flowseal anti-throttle
     enum_result = enumerator.enumerate(
-        tester, threshold=0.5, on_progress=_enum_progress, on_result=_enum_record,
+        tester, threshold=0.65, on_progress=_enum_progress, on_result=_enum_record,
     )
 
     if enum_result:
