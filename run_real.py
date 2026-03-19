@@ -752,7 +752,7 @@ def main():
                         now = datetime.now().strftime("%H:%M")
                         host_statuses = []
                         for host in hosts:
-                            r = _curl_check_one(host, timeout=8)
+                            r = _curl_check_one(host, timeout=10)
                             host_statuses.append((host, r["success"], r["latency_ms"]))
                         health = analytics.get_all_hosts_health(hosts, minutes=10)
                         ui.monitor_line(now, host_statuses, health["overall_rate"])
@@ -869,7 +869,7 @@ def main():
                             # Check monitored hosts
                             host_statuses = []
                             for host in hosts:
-                                r = _curl_check_one(host, timeout=8)
+                                r = _curl_check_one(host, timeout=10)
                                 host_statuses.append((host, r["success"], r["latency_ms"]))
                             health = analytics.get_all_hosts_health(hosts, minutes=10)
                             ui.monitor_line(now, host_statuses, health["overall_rate"])
@@ -890,9 +890,24 @@ def main():
                                     pass
 
                             if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
-                                ui.warn("Health degraded, re-evolving...")
+                                ui.warn("Health degraded, searching better strategy...")
                                 _stop_permanent_zapret(_active_process)
                                 _active_process = None
+                                # Re-enumerate and apply
+                                from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
+                                excluded = ai_feedback.get_excluded_functions()
+                                enum = StrategyEnumerator(excluded_functions=excluded)
+                                new_result = enum.enumerate(tester, threshold=0.4,
+                                    on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
+                                if new_result:
+                                    community["flags"] = new_result["flags"]
+                                    _active_process = _start_permanent_zapret(
+                                        zapret_bin, lua_dir, new_result["flags"],
+                                        hostlist, _tspu_recommended_ttl, config)
+                                    if _active_process:
+                                        print(f"  [OK] New strategy: {' | '.join(new_result['flags'])} (fitness={new_result['fitness']:.3f})")
+                                        continue  # back to watchdog loop
+                                # If re-enum failed, break to outer flow
                                 break
                         if _running and _active_process:
                             _stop_permanent_zapret(_active_process)
@@ -957,7 +972,7 @@ def main():
                         now = datetime.now().strftime("%H:%M")
                         status_parts = []
                         for host in hosts:
-                            r = _curl_check_one(host, timeout=5)
+                            r = _curl_check_one(host, timeout=10)
                             analytics.log_test_result(
                                 strategy_id=active_strategy_id,
                                 host=host, http_code=r["http_code"],
@@ -1098,7 +1113,7 @@ def main():
                     now = datetime.now().strftime("%H:%M")
                     status_parts = []
                     for host in hosts:
-                        r = _curl_check_one(host, timeout=5)
+                        r = _curl_check_one(host, timeout=10)
                         analytics.log_test_result(
                             strategy_id=active_strategy_id,
                             host=host, http_code=r["http_code"],
@@ -1248,7 +1263,7 @@ def main():
         now = datetime.now().strftime("%H:%M")
         status_parts = []
         for host in hosts:
-            r = _curl_check_one(host, timeout=5)
+            r = _curl_check_one(host, timeout=10)
             # Log every check to analytics for streak tracking
             analytics.log_test_result(
                 strategy_id=active_strategy_id,
@@ -1491,7 +1506,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
         any_blocked = False
 
         for host in hosts:
-            r = _curl_check_one(host, timeout=5)
+            r = _curl_check_one(host, timeout=10)
             # Log to analytics (no strategy active yet, use "baseline")
             analytics.log_test_result(
                 strategy_id="baseline", host=host,
