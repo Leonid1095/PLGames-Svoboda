@@ -224,6 +224,59 @@ KNOWN_STRATEGIES: list[dict] = [
         ],
         "desc": "Tiny window + fake + disorder (max anti-H2-kill)",
     },
+
+    # ── Tier 8: Anti-throttling (from Flowseal analysis) ──────────
+    # DPI passes connection but throttles it (~5 sec latency).
+    # cutoff=n3 limits desync to first 3 packets — less CPU, less detection.
+    # fooling=ts manipulates TCP timestamps to confuse DPI tracking.
+    {
+        "name": "flowseal_multisplit_cutoff",
+        "flags": [
+            "multisplit:pos=1:seqovl=681",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "Flowseal: split at seqovl=681 + disorder (anti-throttle)",
+    },
+    {
+        "name": "flowseal_multisplit_568",
+        "flags": [
+            "multisplit:pos=1:seqovl=568",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "Flowseal: split at seqovl=568 + disorder (alt position)",
+    },
+    {
+        "name": "flowseal_fake_google_sni",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5:tls_mod=rnd,dupsid",
+            "multisplit:pos=1:seqovl=681",
+        ],
+        "desc": "Flowseal: fake with Google SNI spoof + split 681",
+    },
+    {
+        "name": "flowseal_fakedsplit_aggressive",
+        "flags": [
+            "fakedsplit:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5:repeats=6",
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "Flowseal: fakedsplit + aggressive disorder",
+    },
+
+    # ── Tier 9: Protocol-agnostic (for non-standard services) ─────
+    {
+        "name": "multidisorder_pos2",
+        "flags": [
+            "multidisorder:pos=2",
+        ],
+        "desc": "Simple disorder at position 2 (minimal, wide compat)",
+    },
+    {
+        "name": "multisplit_pos2_seqovl",
+        "flags": [
+            "multisplit:pos=2:seqovl=8:seqovl_pattern=0x00000000",
+        ],
+        "desc": "Simple split at position 2 with overlap",
+    },
 ]
 
 
