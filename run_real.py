@@ -568,9 +568,11 @@ def main():
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
     dpi_type = tspu_profile.dpi_type if tspu_profile else "unknown"
 
-    # ─── Try AI Engine (agentic mode) ────────────────────────────────
+    # ─── AI Engine — reserved for per-host solving after community/enum ──
+    # Community + enum are free and fast. AI Engine uses LLM (rate limited).
+    # AI Engine activates in per-host solver for hosts that enum can't fix.
     _ai_engine_used = False
-    if ai.is_available and len(blocked) > 0:
+    if False:  # AI Engine runs inside per-host solver, not here
         try:
             from brain.ai_engine import AIEngine, build_engine_context
             from brain.host_solver import HostSolver
