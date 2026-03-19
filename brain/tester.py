@@ -299,8 +299,10 @@ class ConnectionTester:
           latency_bonus (0.25) — reward fast responses (< 1000ms ideal)
           error_penalty (0.15) — RST/refused = full penalty, timeout = partial
         """
-        # 1. Base success rate
-        success_rate = successful / total
+        # 1. Base success rate (throttled = 0.5 weight, not full 1.0)
+        throttled_count = sum(1 for r in results if r.success and r.error_type == "throttled")
+        clean_success = successful - throttled_count
+        success_rate = (clean_success + throttled_count * 0.5) / total
 
         # 2. Latency bonus: only for successful requests
         ok_results = [r for r in results if r.success and r.latency_ms > 0]
@@ -530,8 +532,15 @@ class ConnectionTester:
                 pass
 
             # Success: clean exit + success code, OR success code + timeout
-            # (timeout with HTTP 200 = page loaded but body too large for timeout)
+            # But: if latency > 5 sec, mark as throttled (site loads but very slow)
             if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
+                is_throttled = latency_ms > 5000
+                if is_throttled:
+                    logger.debug("curl %s: HTTP %d in %.0fms (THROTTLED)", host, http_code, latency_ms)
+                    return HostTestResult(
+                        host=host, success=True, http_code=http_code,
+                        latency_ms=latency_ms, error_type="throttled",
+                    )
                 logger.debug("curl %s: HTTP %d in %.0fms (OK)", host, http_code, latency_ms)
                 return HostTestResult(
                     host=host, success=True, http_code=http_code,
