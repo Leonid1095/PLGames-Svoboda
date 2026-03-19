@@ -273,6 +273,9 @@ def _start_permanent_zapret(
         except Exception as exc:
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
+    # Recommended fake TTL from TSPU profiler (used in all profiles)
+    quic_ttl = tspu_ttl if tspu_ttl and tspu_ttl > 0 else 4
+
     # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (all HTTPS except YouTube CDN)
     # ══════════════════════════════════════════════════════════════
@@ -297,7 +300,6 @@ def _start_permanent_zapret(
     # PROFILE 2: TLS for YouTube CDN (googlevideo etc.)
     # These need gentler desync — only fake, no aggressive split
     # ══════════════════════════════════════════════════════════════
-    quic_ttl = tspu_ttl if tspu_ttl and tspu_ttl > 0 else 4
     cmd.extend([
         "--new",
         "--filter-tcp=443",
