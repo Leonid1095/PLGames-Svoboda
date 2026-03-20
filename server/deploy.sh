@@ -26,7 +26,7 @@ if [ "$ACTION" = "clean" ]; then
     python3 - << 'PYEOF'
 import sqlite3, json
 from pathlib import Path
-db = Path("/opt/svoboda-api/svoboda_server.db")
+db = Path("/opt/svoboda-api/data/svoboda_server.db")
 if not db.exists():
     print("DB not found")
     exit(0)
