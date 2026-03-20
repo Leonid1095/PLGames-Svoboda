@@ -658,7 +658,7 @@ def main():
                 return {"strategy": " | ".join(best_flags), "fitness": best_fit, "name": best_name}
 
             def _tool_per_host_solver(host="", **kwargs):
-                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
                 result = solver.solve(host)
                 if result:
                     return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
@@ -825,7 +825,7 @@ def main():
                             time.sleep(1)
 
                             from brain.host_solver import HostSolver
-                            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
                             any_solved = False
                             for fh in failed_hosts:
                                 if not _running:
@@ -1098,7 +1098,7 @@ def main():
                 failed_hosts = [h for h, ok in verify.items() if not ok]
                 if failed_hosts and _running:
                     from brain.host_solver import HostSolver
-                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
                     for fh in failed_hosts:
                         if not _running:
                             break
@@ -1341,7 +1341,7 @@ def main():
             ui.warn(f"Persistent failures: {', '.join(persistent_fails)}")
             ui.info("Searching for per-host strategies...")
 
-            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback)
+            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
             solved_any = False
 
             for fail_host in persistent_fails[:2]:

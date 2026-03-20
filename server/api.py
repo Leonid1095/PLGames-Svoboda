@@ -115,6 +115,22 @@ CREATE INDEX IF NOT EXISTS idx_scores_fitness ON strategy_scores(avg_fitness DES
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_scores_unique
     ON strategy_scores(flags, isp);
+
+CREATE TABLE IF NOT EXISTS host_strategies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    host TEXT NOT NULL,
+    isp TEXT NOT NULL DEFAULT 'unknown',
+    flags TEXT NOT NULL,
+    avg_fitness REAL NOT NULL,
+    report_count INTEGER DEFAULT 1,
+    last_reported TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_host_strategies_unique
+    ON host_strategies(host, isp, flags);
+
+CREATE INDEX IF NOT EXISTS idx_host_strategies_host ON host_strategies(host);
+CREATE INDEX IF NOT EXISTS idx_host_strategies_isp ON host_strategies(isp);
 """
 
 
@@ -471,6 +487,84 @@ async def get_recommended_strategies(
             for r in cursor.fetchall()
         ]
         return {"strategies": strategies, "isp": isp}
+    finally:
+        conn.close()
+
+
+# ─── Per-host strategies (ISP×host×strategy matrix) ──────────────────────────
+
+@app.get("/api/v1/host-strategies")
+async def get_host_strategies(
+    host: str = Query(...),
+    install_id: str = Query(...),
+    isp: Optional[str] = Query(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Get community-contributed strategies for a specific host."""
+    _verify_api_key(x_api_key)
+    conn = get_db()
+    try:
+        if not isp:
+            cursor = conn.execute("SELECT isp FROM installs WHERE install_id = ?", (install_id,))
+            row = cursor.fetchone()
+            isp = row[0] if row else "unknown"
+
+        if isp and isp != "unknown":
+            cursor = conn.execute(
+                """SELECT flags, avg_fitness, isp, report_count FROM host_strategies
+                   WHERE host = ? AND isp = ? AND report_count >= 1
+                   ORDER BY avg_fitness DESC LIMIT 5""", (host, isp))
+        else:
+            cursor = conn.execute(
+                """SELECT flags, avg_fitness, isp, report_count FROM host_strategies
+                   WHERE host = ? AND report_count >= 2
+                   ORDER BY avg_fitness DESC LIMIT 5""", (host,))
+
+        strategies = [
+            {"flags": json.loads(r[0]), "fitness": round(r[1], 3), "isp": r[2], "report_count": r[3]}
+            for r in cursor.fetchall()
+        ]
+        return {"host": host, "isp": isp, "strategies": strategies}
+    finally:
+        conn.close()
+
+
+@app.post("/api/v1/host-strategies/report")
+async def report_host_strategy(
+    install_id: str = Query(...),
+    host: str = Query(...),
+    isp: str = Query("unknown"),
+    flags_json: str = Query(...),
+    fitness: float = Query(...),
+    x_api_key: Optional[str] = Header(None),
+):
+    """Report a working per-host strategy to the community."""
+    _verify_api_key(x_api_key)
+    if fitness < 0.3 or fitness > 1.0:
+        raise HTTPException(status_code=400, detail="Fitness must be 0.3-1.0")
+
+    try:
+        flags = json.loads(flags_json)
+        if not isinstance(flags, list) or not flags:
+            raise ValueError("flags must be non-empty list")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid flags_json: {exc}")
+
+    conn = get_db()
+    try:
+        now = datetime.utcnow().isoformat()
+        flags_str = json.dumps(flags, ensure_ascii=False)
+        conn.execute(
+            """INSERT INTO host_strategies (host, isp, flags, avg_fitness, report_count, last_reported)
+               VALUES (?, ?, ?, ?, 1, ?)
+               ON CONFLICT(host, isp, flags) DO UPDATE SET
+                 avg_fitness = (avg_fitness * report_count + excluded.avg_fitness) / (report_count + 1),
+                 report_count = report_count + 1,
+                 last_reported = excluded.last_reported""",
+            (host, isp, flags_str, fitness, now),
+        )
+        conn.commit()
+        return {"ok": True, "host": host, "isp": isp}
     finally:
         conn.close()
 

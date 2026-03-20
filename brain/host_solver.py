@@ -62,12 +62,13 @@ class HostSolver:
             solver.save()
     """
 
-    def __init__(self, config: dict, tester=None, ai_feedback=None):
+    def __init__(self, config: dict, tester=None, ai_feedback=None, server_sync=None):
         self._config = config
         self._base_dir = Path(config.get("_base_dir", "."))
         self._db_path = self._base_dir / "host_strategies.json"
         self._tester = tester
         self._ai_feedback = ai_feedback
+        self._sync = server_sync
         self._strategies: dict[str, HostStrategy] = {}
         self._load()
 
@@ -102,6 +103,24 @@ class HostSolver:
             return None
 
         from brain.enumerator import KNOWN_STRATEGIES
+
+        # ── Level 0: Check community server for known solution ─────────
+        if self._sync and not strategies_to_try:
+            try:
+                community = self._sync.get_host_strategy(host, isp)
+                if community and community.get("flags"):
+                    fitness = self._tester.test_strategy_single_host(community["flags"], host)
+                    if fitness > 0.5:
+                        logger.info("Solved %s: Level 0 (community) — fitness=%.3f", host, fitness)
+                        hs = HostStrategy(
+                            host=host, flags=community["flags"], fitness=fitness,
+                            isp=isp, tested_at=time.time(),
+                        )
+                        self._strategies[host] = hs
+                        self._save()
+                        return hs
+            except Exception as exc:
+                logger.debug("Level 0 community check failed: %s", exc)
 
         # ── Level 1: Standard zapret2 strategies ──────────────────────
         candidates = strategies_to_try or KNOWN_STRATEGIES
@@ -147,6 +166,11 @@ class HostSolver:
             self._strategies[host] = hs
             self._save()
             logger.info("Solved %s: Level 1 — %s (fitness=%.3f)", host, best_name, best_fitness)
+            if self._sync and best_fitness > 0.5:
+                try:
+                    self._sync.report_host_strategy(host, best_flags, best_fitness, isp)
+                except Exception:
+                    pass
             return hs
 
         # ── Level 2: Anti-H2 strategies (wssize=1) ───────────────────
@@ -170,6 +194,11 @@ class HostSolver:
                 self._strategies[host] = hs
                 self._save()
                 logger.info("Solved %s: Level 2 — %s (fitness=%.3f)", host, strat["name"], fitness)
+                if self._sync and fitness > 0.5:
+                    try:
+                        self._sync.report_host_strategy(host, strat["flags"], fitness, isp)
+                    except Exception:
+                        pass
                 return hs
 
         # ── Level 3: ByeDPI SOCKS proxy ──────────────────────────────

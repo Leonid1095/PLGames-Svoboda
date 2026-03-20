@@ -289,6 +289,60 @@ class ServerSync:
             pass
         return None
 
+    def get_host_strategy(self, host: str, isp: str = "unknown") -> Optional[dict]:
+        """Get community strategy for a specific host from server.
+
+        Returns {"flags": [...], "fitness": 0.8} or None.
+        """
+        if not self.is_configured or not self._api_key:
+            return None
+        try:
+            resp = requests.get(
+                f"{self._api_url}/api/v1/host-strategies",
+                params={"host": host, "install_id": self._install_id, "isp": isp},
+                headers=self._headers(),
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                strategies = data.get("strategies", [])
+                if strategies:
+                    best = strategies[0]
+                    logger.info(
+                        "Got community strategy for %s: fitness=%.3f (%d reports)",
+                        host, best["fitness"], best["report_count"],
+                    )
+                    return best
+        except requests.RequestException as exc:
+            logger.debug("Host strategy fetch for %s failed: %s", host, exc)
+        return None
+
+    def report_host_strategy(
+        self, host: str, flags: list[str], fitness: float, isp: str = "unknown",
+    ) -> bool:
+        """Report a working per-host strategy to the community."""
+        if not self.is_configured or not self._api_key or fitness < 0.3:
+            return False
+        try:
+            resp = requests.post(
+                f"{self._api_url}/api/v1/host-strategies/report",
+                params={
+                    "install_id": self._install_id,
+                    "host": host,
+                    "isp": isp,
+                    "flags_json": json.dumps(flags),
+                    "fitness": round(fitness, 3),
+                },
+                headers=self._headers(),
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                logger.info("Reported host strategy for %s (fitness=%.3f)", host, fitness)
+                return True
+        except requests.RequestException:
+            pass
+        return False
+
     # ─── Pull: get updated strategies from server ──────────────────────────
 
     def _pull_strategies(self) -> list[dict]:
