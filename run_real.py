@@ -660,7 +660,7 @@ def main():
 
             def _tool_per_host_solver(host="", **kwargs):
                 solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                result = solver.solve(host)
+                result = solver.solve(host, isp=isp_name)
                 if result:
                     return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
                 return {"strategy": "", "fitness": 0.0}
