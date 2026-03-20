@@ -63,6 +63,7 @@ class HostSolver:
     """
 
     def __init__(self, config: dict, tester=None, ai_feedback=None):
+        self._config = config
         self._base_dir = Path(config.get("_base_dir", "."))
         self._db_path = self._base_dir / "host_strategies.json"
         self._tester = tester
@@ -197,7 +198,7 @@ class HostSolver:
         logger.warning("Could not solve %s after all levels", host)
         return None
 
-    def build_extra_profiles(self) -> list[str]:
+    def build_extra_profiles(self, lua_dir=None) -> list[str]:
         """Build extra winws2 --new profiles for per-host strategies.
 
         Returns list of command-line arguments to append to winws2.

@@ -51,7 +51,7 @@ LICENSE_DAYS = 30
 
 # Rate limits per tier (seconds between AI calls)
 TIER_RATE_LIMITS = {
-    "free": 86400,       # 1x/day
+    "free": 14400,       # 5x/day (every 4h)
     "supporter": 7200,   # every 2h
     "pro": 1800,         # every 30min
 }
