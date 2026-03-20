@@ -607,7 +607,8 @@ def main():
         ui.ok("All sites accessible without DPI bypass.")
         print("  Starting monitoring mode (will activate if blocking detected)...")
         _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
-                         ai, sync, tier, profiler, isp_name, hostlist)
+                         ai, sync, tier, profiler, isp_name, hostlist,
+                         ai_feedback=ai_feedback, tspu_profile=tspu_profile)
         analytics.close()
         return
 
@@ -831,7 +832,7 @@ def main():
                                 if not _running:
                                     break
                                 print(f"\n  Solving: {fh}...")
-                                result = solver.solve(fh)
+                                result = solver.solve(fh, isp=isp_name)
                                 if result:
                                     print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
                                     any_solved = True
@@ -1103,7 +1104,7 @@ def main():
                         if not _running:
                             break
                         print(f"\n  Solving: {fh}...")
-                        result = solver.solve(fh)
+                        result = solver.solve(fh, isp=isp_name)
                         if result:
                             print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
                             extra = solver.build_extra_profiles(lua_dir)
@@ -1182,7 +1183,7 @@ def main():
         print(f"\n  Starting GA evolution (this may take a few minutes)...")
 
         # ─── Build seed strategies ────────────────────────────────────────
-        seeds = _get_seeds(isp_name, ai)
+        seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
 
         # ─── Real Evolution ──────────────────────────────────────────────
         ga_config = GAConfig.from_config(config)
@@ -1473,7 +1474,7 @@ def main():
             # ── Step 5: GA evolution as last resort ──────────────────
             if not found_fix:
                 ui.step("Step 5: GA evolution (last resort)...")
-                seeds = _get_seeds(isp_name, ai)
+                seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
                 best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
                 if best and best.fitness > 0.1:
                     record = manager.save_strategy(best.flags, best.fitness, isp_name)
@@ -1506,7 +1507,8 @@ def main():
 
 
 def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
-                     ai, sync, tier, profiler, isp_name, hostlist=None):
+                     ai, sync, tier, profiler, isp_name, hostlist=None,
+                     ai_feedback=None, tspu_profile=None):
     """Monitor connectivity and activate bypass if blocking detected."""
     global _running, _active_process
     interval = config.get("watchdog_interval_minutes", 5) * 60
@@ -1556,7 +1558,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                 print(f"\n  [!] Blocking detected: {', '.join(health['degraded'])}")
                 print("  Starting DPI bypass...")
 
-                seeds = _get_seeds(isp_name, ai)
+                seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
                 best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
 
                 if best and best.fitness > 0.1:
@@ -1569,7 +1571,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
     analytics.close()
 
 
-def _get_seeds(isp_name: str, ai: AIAdvisor) -> list[list[str]]:
+def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None) -> list[list[str]]:
     """Get seed strategies from ISP profile + AI.
 
     Seeds are ordered: proven TSPU combos first, then generic.
@@ -1599,11 +1601,9 @@ def _get_seeds(isp_name: str, ai: AIAdvisor) -> list[list[str]]:
     if ai.is_available:
         print("  Asking AI for strategy suggestions...")
         try:
-            _fb = ai_feedback
-            _tp = tspu_profile if tspu_profile else None
             ai_seeds = ai.suggest_strategies(
                 isp=isp_name, middlebox_type="unknown",
-                ai_feedback=_fb, tspu_profile=_tp,
+                ai_feedback=ai_feedback, tspu_profile=tspu_profile,
             )
             if ai_seeds:
                 print(f"  AI suggested {len(ai_seeds)} strategies")
