@@ -232,6 +232,10 @@ class ServerSync:
                 data = resp.json()
                 strategy = data.get("strategy")
                 if strategy and strategy.get("flags"):
+                    flags = strategy["flags"]
+                    if any(f.startswith("-") for f in flags):
+                        logger.warning("Server returned old zapret v1 flags, ignoring: %s", flags[:2])
+                        return None
                     logger.info(
                         "Got instant strategy from community: fitness=%.3f, %d reports",
                         strategy["fitness"], strategy["report_count"],
@@ -357,7 +361,14 @@ class ServerSync:
 
             if resp.status_code == 200:
                 data = resp.json()
-                strategies = data.get("strategies", [])
+                raw = data.get("strategies", [])
+                # Filter out old zapret v1 format flags (those starting with '-')
+                strategies = [
+                    s for s in raw
+                    if s.get("flags") and not any(f.startswith("-") for f in s["flags"])
+                ]
+                if len(strategies) < len(raw):
+                    logger.debug("Filtered %d old-format strategies", len(raw) - len(strategies))
                 if strategies:
                     logger.info("Pulled %d strategies from server", len(strategies))
                 return strategies

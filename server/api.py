@@ -44,6 +44,33 @@ DONATEPAY_API_BASE = "https://donatepay.ru/api/v1"
 # Registration secret for deriving per-install tokens
 REGISTRATION_SECRET = os.environ.get("REGISTRATION_SECRET", API_KEY)
 
+# ─── zapret2 format validation ─────────────────────────────────────────────────
+
+# Valid zapret2 lua-desync function prefixes (never start with '-')
+_ZAPRET2_FUNCTIONS = {
+    "multisplit", "multidisorder", "fake", "fakedsplit", "syndata",
+    "wssize", "drop", "oob", "tcpseg", "hostfakesplit", "circular",
+    "pktmod", "send", "stopif", "argdebug",
+}
+
+def _is_zapret2_flags(flags: list) -> bool:
+    """Validate that flags are in zapret2 lua-desync format, not old zapret v1.
+
+    Old format: ['--dpi-desync=disorder2', '--dpi-desync-ttl=5']
+    New format: ['multisplit:pos=1:seqovl=4096', 'fake:blob=...:ip_ttl=4']
+    """
+    if not flags or not isinstance(flags, list):
+        return False
+    for flag in flags:
+        if not isinstance(flag, str):
+            return False
+        if flag.startswith("-"):
+            return False  # old zapret v1 format
+        func = flag.split(":")[0].split("=")[0]
+        if func not in _ZAPRET2_FUNCTIONS:
+            return False
+    return True
+
 # Tier thresholds (RUB)
 TIER_SUPPORTER_MIN = 300
 TIER_PRO_MIN = 600
@@ -485,6 +512,7 @@ async def get_recommended_strategies(
         strategies = [
             {"flags": json.loads(r[0]), "fitness": round(r[1], 3), "isp": r[2], "report_count": r[3]}
             for r in cursor.fetchall()
+            if _is_zapret2_flags(json.loads(r[0]))  # exclude old zapret v1 format
         ]
         return {"strategies": strategies, "isp": isp}
     finally:
@@ -746,9 +774,13 @@ async def get_instant_strategy(
         if not row:
             return {"strategy": None, "reason": "No community strategies available yet"}
 
+        flags = json.loads(row[0])
+        if not _is_zapret2_flags(flags):
+            return {"strategy": None, "reason": "No zapret2-compatible strategies yet"}
+
         return {
             "strategy": {
-                "flags": json.loads(row[0]),
+                "flags": flags,
                 "fitness": round(row[1], 3),
                 "report_count": row[2],
                 "isp": row[4],
@@ -766,6 +798,8 @@ async def vote_strategy(
 ):
     """Record a vote (success/failure) for a strategy from a real user."""
     _verify_api_key(x_api_key)
+    if not _is_zapret2_flags(req.flags):
+        raise HTTPException(status_code=400, detail="Invalid flags format: must be zapret2 lua-desync calls, not zapret v1 --dpi-desync flags")
     conn = get_db()
     now = datetime.now(timezone.utc).isoformat()
     flags_json = json.dumps(req.flags, ensure_ascii=False)
