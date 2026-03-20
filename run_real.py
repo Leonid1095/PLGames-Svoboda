@@ -1469,12 +1469,13 @@ def main():
                             break
 
             # ── Step 4: Fast enumeration if AI didn't help ───────────
+            # threshold=0.60 rejects throttled strategies (fitness≈0.25-0.35)
             if not found_fix:
-                ui.step("Step 4: Fast enumeration...")
+                ui.step("Step 4: Fast enumeration (anti-throttle first)...")
                 excluded = ai_feedback.get_excluded_functions()
                 enum = StrategyEnumerator(excluded_functions=excluded)
-                result = enum.enumerate(tester, threshold=0.5,
-                    on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, 0.5))
+                result = enum.enumerate(tester, threshold=0.60,
+                    on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, 0.60))
                 if result:
                     ui.ok(f"Found: {result['name']} (fitness={result['fitness']:.3f})")
                     record = manager.save_strategy(result["flags"], result["fitness"], isp_name)
@@ -1605,12 +1606,14 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                             best_fitness = fit
                             print(f"  [OK] Community strategy: fitness={fit:.3f}")
 
-                # Step 2: Enumerator (~30 sec) if community failed
+                # Step 2: Enumerator (~30-60 sec) if community failed
+                # threshold=0.60: rejects throttled strategies (fitness≈0.25-0.35)
                 if not best_flags:
-                    print("  Running enumerator (25 strategies)...")
+                    print("  Running enumerator (anti-throttle first)...")
                     from brain.enumerator import StrategyEnumerator
-                    enum = StrategyEnumerator()
-                    result = enum.enumerate(tester, threshold=0.5,
+                    excluded = ai_feedback.get_excluded_functions() if ai_feedback else set()
+                    enum = StrategyEnumerator(excluded_functions=excluded)
+                    result = enum.enumerate(tester, threshold=0.60,
                         on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                     if result:
                         best_flags = result["flags"]
@@ -1644,17 +1647,27 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
     not just split/disorder which only helps initial handshake.
     """
     seeds = [
-        # autottl fake — auto-calibrates TTL to reach DPI but not server
+        # ── Anti-throttle FIRST (ER-Telecom/Dom.ru TSPU 2025+) ──────────────
+        # seqovl=4096 overwhelms TSPU state buffer → no throttling
+        ["multisplit:pos=1:seqovl=4096"],
+        ["multisplit:pos=1:seqovl=4096", "multidisorder:pos=1,midsld"],
+        # seqovl=681 = exact SNI field offset (Flowseal/Dom.ru proven)
+        ["multisplit:pos=1:seqovl=681", "multidisorder:pos=1,midsld"],
+        ["multisplit:pos=sniext+1:seqovl=681:seqovl_pattern=fake_default_tls"],
+        # wssize=1 breaks HTTP/2 multiplexing → TSPU can't track streams
+        ["wssize:wsize=1:scale=0", "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000"],
+        ["wssize:wsize=1:scale=0", "multisplit:pos=1:seqovl=681"],
+        # fake + seqovl=4096 (combined, for ISPs that need SNI confusion)
+        ["fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5:repeats=6:tls_mod=rnd,dupsid", "multisplit:pos=1:seqovl=4096"],
+        # ── autottl fake (for ISPs where fake works) ──────────────────────
         ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=6", "multisplit:pos=midsld"],
         ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5", "multidisorder:pos=1,midsld"],
-        # Known winner: multisplit + multidisorder
-        ["multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000", "multidisorder:pos=1,midsld"],
-        # autottl + high repeats (aggressive TSPU)
         ["fake:blob=fake_default_tls:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5:repeats=8", "multisplit:pos=1,midsld"],
-        # fakedsplit with autottl
         ["fakedsplit:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5"],
-        # Combined winner + fake
-        ["fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=4", "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000"],
+        # ── NOTE: seqovl=8 intentionally excluded from seeds ─────────────
+        # seqovl=8 is throttled by TSPU on ER-Telecom/AS42116.
+        # It passes single-shot tests (fast response) but degrades to 8s
+        # under sustained traffic. Let enumerator try it as fallback only.
     ]
 
     # ISP-specific seeds

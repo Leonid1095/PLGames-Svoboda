@@ -112,8 +112,11 @@ class ConnectionTester:
         self.hosts_ws: list[str] = config.get("test_hosts_websocket", ["gateway.discord.gg"])
         self.trials: int = config.get("test_trials", 3)
         self.timeout: int = config.get("test_timeout", 8)
-        self._evo_timeout: int = min(self.timeout, 5)  # shorter timeout during evolution
+        self._evo_timeout: int = min(self.timeout, 6)  # shorter timeout during evolution
         self._evo_trials: int = 1  # 1 trial per host during evolution (fast screening)
+        # Throttle detection: threshold for marking a response as "throttled"
+        # TSPU throttles to ~8s. 3s threshold catches mild throttling early.
+        self._throttle_ms: int = config.get("throttle_threshold_ms", 3000)
         self._base_dir = Path(config.get("_base_dir", "."))
         self._is_windows = platform.system() == "Windows"
         self._zapret_bin = self._resolve_zapret_binary()
@@ -233,9 +236,12 @@ class ConnectionTester:
                     break
 
             # 3b. Extended tests: H2 stream + WebSocket (only if basic tests passed)
+            # H2 stream downloads 64KB — simulates sustained traffic which
+            # triggers TSPU throttling (single-shot tests miss this).
+            # Use longer timeout (10s) to catch 8s throttled responses.
             if successful > 0:
                 for host in self.hosts_h2:
-                    r = self._curl_test_h2_stream(host, timeout_override=timeout + 2)
+                    r = self._curl_test_h2_stream(host, timeout_override=10)
                     all_results.append(r)
                     total_tests += 1
                     if r.success:
@@ -295,39 +301,55 @@ class ConnectionTester:
         """Composite fitness: success rate + latency bonus - error penalty.
 
         Components (weights sum to 1.0):
-          success_rate  (0.60) — fraction of successful tests
-          latency_bonus (0.25) — reward fast responses (< 1000ms ideal)
+          success_rate  (0.55) — fraction of successful tests
+          latency_bonus (0.30) — reward fast responses (hard cliff at 3s)
           error_penalty (0.15) — RST/refused = full penalty, timeout = partial
+
+        Throttle logic:
+          - Throttled response (latency > threshold) = 0.25 weight (was 0.5)
+          - If ALL successful results are throttled → heavy extra penalty
+          This ensures throttled-but-passing strategies score below 0.5
+          and get rejected in favor of clean fast strategies.
         """
-        # 1. Base success rate (throttled = 0.5 weight, not full 1.0)
+        # 1. Base success rate
+        # throttled = 0.25 weight (reduced from 0.5 — throttling is near-failure)
         throttled_count = sum(1 for r in results if r.success and r.error_type == "throttled")
         clean_success = successful - throttled_count
-        success_rate = (clean_success + throttled_count * 0.5) / total
+        success_rate = (clean_success + throttled_count * 0.25) / total
 
-        # 2. Latency bonus: only for successful requests
-        ok_results = [r for r in results if r.success and r.latency_ms > 0]
-        if ok_results:
-            avg_latency = sum(r.latency_ms for r in ok_results) / len(ok_results)
-            # 0ms → 1.0, 1000ms → 0.5, 3000ms → ~0.25, 5000ms+ → ~0.15
+        # 2. Latency bonus: only for clean (non-throttled) successful requests
+        # Throttled latencies (3-8s) would collapse the bonus unfairly for mixed results.
+        # Hard cliff: latency > 3000ms → bonus collapses steeply.
+        clean_ok = [r for r in results if r.success and r.error_type != "throttled" and r.latency_ms > 0]
+        if clean_ok:
+            avg_latency = sum(r.latency_ms for r in clean_ok) / len(clean_ok)
+            # 0ms → 1.0, 500ms → 0.67, 1000ms → 0.5, 3000ms → 0.25, 5000ms → 0.17
             latency_bonus = 1.0 / (1.0 + avg_latency / 1000.0)
+        elif throttled_count > 0:
+            # All responses were throttled → minimal latency bonus
+            latency_bonus = 0.05
         else:
             latency_bonus = 0.0
 
-        # 3. Error penalty: classify failures
+        # 3. Error penalty
         fail_results = [r for r in results if not r.success]
         if fail_results:
             rst_count = sum(1 for r in fail_results if r.error_type == "rst")
             timeout_count = sum(1 for r in fail_results if r.error_type == "timeout")
             other_count = len(fail_results) - rst_count - timeout_count
-            # RST = active blocking (full penalty), timeout = passive (partial)
             penalty_score = (rst_count * 1.0 + timeout_count * 0.6 + other_count * 0.3) / total
         else:
             penalty_score = 0.0
 
+        # 4. All-throttled penalty: if every success is throttled, add extra penalty.
+        # This pushes fully-throttled strategies clearly below 0.5 threshold.
+        all_throttled_penalty = 0.15 if (successful > 0 and clean_success == 0) else 0.0
+
         fitness = (
-            0.60 * success_rate
-            + 0.25 * latency_bonus
+            0.55 * success_rate
+            + 0.30 * latency_bonus
             - 0.15 * penalty_score
+            - all_throttled_penalty
         )
 
         return max(0.0, min(1.0, fitness))
@@ -532,9 +554,12 @@ class ConnectionTester:
                 pass
 
             # Success: clean exit + success code, OR success code + timeout
-            # But: if latency > 5 sec, mark as throttled (site loads but very slow)
+            # If latency > throttle threshold, mark as throttled.
+            # Default 3000ms catches TSPU throttling (manifests at ~3-8s).
+            # Single-shot tests pass quickly; throttling shows under sustained load.
             if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
-                is_throttled = latency_ms > 5000
+                throttle_ms = getattr(self, "_throttle_ms", 3000)
+                is_throttled = latency_ms > throttle_ms
                 if is_throttled:
                     logger.debug("curl %s: HTTP %d in %.0fms (THROTTLED)", host, http_code, latency_ms)
                     return HostTestResult(

@@ -27,13 +27,14 @@ KNOWN_STRATEGIES: list[dict] = [
     # ── Tier 0: Anti-throttle FIRST (ER-Telecom/Dom.ru + Flowseal proven) ─
     # TSPU stateful DPI throttles connections when it recognizes bypass pattern.
     # seqovl=4096 overwhelms DPI state buffer. seqovl=681 = SNI field offset.
-    # These must be tested BEFORE basic seqovl=8 strategies which get throttled.
+    # wssize=1 breaks HTTP/2 mux so TSPU cannot track stream state.
+    # These MUST be tested BEFORE seqovl=8 strategies (which get throttled).
     {
         "name": "ertel_multisplit_4096",
         "flags": [
             "multisplit:pos=1:seqovl=4096",
         ],
-        "desc": "ER-Telecom/Dom.ru: 4KB overlap overwhelms DPI state buffer",
+        "desc": "ER-Telecom/Dom.ru: 4KB overlap overwhelms DPI state buffer (anti-throttle)",
     },
     {
         "name": "ertel_multisplit_4096_disorder",
@@ -41,22 +42,7 @@ KNOWN_STRATEGIES: list[dict] = [
             "multisplit:pos=1:seqovl=4096",
             "multidisorder:pos=1,midsld",
         ],
-        "desc": "ER-Telecom: 4KB overlap + disorder (proven for Dom.ru)",
-    },
-    {
-        "name": "ertel_hostfakesplit",
-        "flags": [
-            "hostfakesplit:host=ya.ru:tcp_md5:badsum",
-        ],
-        "desc": "ER-Telecom: send fake ya.ru SNI (bad checksum) before real ClientHello",
-    },
-    {
-        "name": "ertel_fake_4096",
-        "flags": [
-            "fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5:repeats=6:tls_mod=rnd,dupsid",
-            "multisplit:pos=1:seqovl=4096",
-        ],
-        "desc": "ER-Telecom: fake Google SNI TTL=5 + split 4096",
+        "desc": "ER-Telecom: 4KB overlap + disorder (proven for Dom.ru, anti-throttle)",
     },
     {
         "name": "flowseal_681_disorder",
@@ -65,6 +51,66 @@ KNOWN_STRATEGIES: list[dict] = [
             "multidisorder:pos=1,midsld",
         ],
         "desc": "Flowseal: SNI-field offset 681 + disorder (anti-throttle)",
+    },
+    {
+        "name": "blockcheck2_sniext1_pat",
+        "flags": [
+            "multisplit:pos=sniext+1:seqovl=681:seqovl_pattern=fake_default_tls",
+        ],
+        "desc": "blockcheck2 canonical: split at SNI ext+1 with TLS blob overlap",
+    },
+    {
+        "name": "blockcheck2_sniext4_pat",
+        "flags": [
+            "multisplit:pos=sniext+4:seqovl=681:seqovl_pattern=fake_default_tls",
+        ],
+        "desc": "blockcheck2 canonical: split at SNI ext+4 with TLS blob overlap",
+    },
+    # ── Tier 0b: wssize=1 anti-throttle (HTTP/2 stream kill bypass) ──────
+    # Tiny TCP window forces server to send 1-byte segments → TSPU cannot
+    # reconstruct HTTP/2 multiplexed streams → cannot classify as bypass.
+    # Works differently from seqovl — good fallback when seqovl=4096 fails.
+    {
+        "name": "wssize1_disorder_4096",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Tiny TCP window + 4KB seqovl: dual anti-throttle mechanism",
+    },
+    {
+        "name": "wssize1_multidisorder",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "Tiny TCP window + disorder: breaks H2 stream DPI tracking",
+    },
+    {
+        "name": "wssize1_disorder_681",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multisplit:pos=1:seqovl=681",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "Tiny window + SNI-offset split + disorder (triple anti-throttle)",
+    },
+    {
+        "name": "wssize1_multisplit",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000",
+        ],
+        "desc": "Tiny TCP window + split (H2 stream kill bypass)",
+    },
+    # ── Tier 0c: remaining seqovl anti-throttle variants ─────────────────
+    {
+        "name": "ertel_fake_4096",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=5:ip6_ttl=5:tcp_md5:repeats=6:tls_mod=rnd,dupsid",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "ER-Telecom: fake Google SNI TTL=5 + split 4096",
     },
     {
         "name": "flowseal_681_fake",
@@ -83,29 +129,19 @@ KNOWN_STRATEGIES: list[dict] = [
         "desc": "Flowseal: split at seqovl=568 + disorder (alt position)",
     },
     {
+        "name": "ertel_hostfakesplit",
+        "flags": [
+            "hostfakesplit:host=ya.ru:tcp_md5:badsum",
+        ],
+        "desc": "ER-Telecom: send fake ya.ru SNI (bad checksum) before real ClientHello",
+    },
+    {
         "name": "flowseal_fakedsplit_aggressive",
         "flags": [
             "fakedsplit:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5:repeats=6",
             "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
         ],
         "desc": "Flowseal: fakedsplit + aggressive disorder",
-    },
-    # blockcheck2 canonical: split at SNI extension boundary with full blob as seqovl_pattern
-    # This is what zapret2's own blockcheck2.d/standard/23-seqovl.sh tests.
-    # seqovl_pattern=fake_default_tls makes the overlap data look like a TLS ClientHello.
-    {
-        "name": "blockcheck2_sniext1_pat",
-        "flags": [
-            "multisplit:pos=sniext+1:seqovl=681:seqovl_pattern=fake_default_tls",
-        ],
-        "desc": "blockcheck2 canonical: split at SNI ext+1 with TLS blob overlap",
-    },
-    {
-        "name": "blockcheck2_sniext4_pat",
-        "flags": [
-            "multisplit:pos=sniext+4:seqovl=681:seqovl_pattern=fake_default_tls",
-        ],
-        "desc": "blockcheck2 canonical: split at SNI ext+4 with TLS blob overlap",
     },
     {
         "name": "tcpseg_drop",
@@ -299,31 +335,31 @@ KNOWN_STRATEGIES: list[dict] = [
         "desc": "Chrome-like window + split with padding",
     },
 
-    # ── Tier 7: HTTP/2 stream kill bypass (Telegram, Discord streams) ──
+    # ── Tier 7: wssize variants with fake (when seqovl alone fails) ──────
     {
-        "name": "wssize1_multidisorder",
-        "flags": [
-            "wssize:wsize=1:scale=0",
-            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
-        ],
-        "desc": "Tiny TCP window breaks H2 stream DPI + disorder",
-    },
-    {
-        "name": "wssize1_multisplit",
-        "flags": [
-            "wssize:wsize=1:scale=0",
-            "multisplit:pos=3:seqovl=8:seqovl_pattern=0x00000000",
-        ],
-        "desc": "Tiny TCP window + split (H2 stream kill bypass)",
-    },
-    {
-        "name": "wssize1_disorder_fake",
+        "name": "wssize1_fake_ttl4_disorder",
         "flags": [
             "wssize:wsize=1:scale=0",
             "fake:blob=fake_default_tls:ip_ttl=4:tcp_md5:repeats=4",
             "multidisorder:pos=1,midsld",
         ],
-        "desc": "Tiny window + fake + disorder (max anti-H2-kill)",
+        "desc": "Tiny window + fake TTL=4 + disorder (max anti-H2-kill)",
+    },
+    {
+        "name": "wssize8_disorder",
+        "flags": [
+            "wssize:wsize=8:scale=0",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "Very small TCP window (8 bytes) + disorder",
+    },
+    {
+        "name": "wssize16_split_4096",
+        "flags": [
+            "wssize:wsize=16:scale=0",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Small window (16 bytes) + 4KB seqovl anti-throttle",
     },
 
     # ── Tier 8: Protocol-agnostic (for non-standard services) ─────
