@@ -1191,7 +1191,7 @@ def main():
         ga_config.population_size = min(ga_config.population_size, 10)
         fitness_threshold = config.get("fitness_apply_threshold", 0.7)
 
-        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
+        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback)
 
     if not best or best.fitness < 0.1:
         print()
@@ -1383,18 +1383,15 @@ def main():
                 _stop_permanent_zapret(_active_process)
                 _active_process = None
 
-                # Rebuild with extra per-host profiles
                 main_flags = best.flags if best else []
+                extra = solver.build_extra_profiles(lua_dir)
                 _active_process = _start_permanent_zapret(
                     zapret_bin, lua_dir, main_flags, hostlist,
                     _tspu_recommended_ttl, config,
+                    extra_profiles=extra,
                 )
-
-                # Append per-host profiles
-                # (Note: would need winws2 restart — for now, the main
-                # strategy may help the solved host too since we tested it)
                 if _active_process:
-                    ui.ok("winws2 restarted with updated strategies")
+                    ui.ok(f"winws2 restarted with {len(extra)//4 if extra else 0} per-host profiles")
 
             if sync.is_configured:
                 sync.sync_now()
@@ -1436,13 +1433,27 @@ def main():
             for change in report.changes[:2]:
                 ui.detail(f"Suggestion: {change.action} {change.target} → {change.new_value}")
 
-            # ── Step 3: Try AI-suggested fix first ───────────────────
+            # ── Step 2.5: Community strategy (fastest fix) ───────────
             _stop_permanent_zapret(_active_process)
             _active_process = None
             cycle_num += 1
             found_fix = False
 
-            if report.improved_flags:
+            if sync.is_configured:
+                ui.step("Step 2.5: Community strategy...")
+                community_s = sync.get_instant_strategy(isp_name, dpi_type)
+                if community_s and community_s.get("flags"):
+                    fit = tester.test_strategy(community_s["flags"])
+                    ai_feedback.record_test(community_s["flags"], fit, "ok" if fit > 0.3 else "timeout")
+                    if fit > 0.5:
+                        ui.ok(f"Community fix works! fitness={fit:.3f}")
+                        record = manager.save_strategy(community_s["flags"], fit, isp_name)
+                        active_strategy_id = record.id
+                        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community_s["flags"], hostlist, _tspu_recommended_ttl, config)
+                        found_fix = bool(_active_process)
+
+            # ── Step 3: Try AI-suggested fix ─────────────────────────
+            if report.improved_flags and not found_fix:
                 ui.step("Step 3: Testing AI suggestion...")
                 for improved in report.improved_flags[:2]:
                     fit = tester.test_strategy(improved)
@@ -1475,14 +1486,37 @@ def main():
             if not found_fix:
                 ui.step("Step 5: GA evolution (last resort)...")
                 seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
-                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
+                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback)
                 if best and best.fitness > 0.1:
                     record = manager.save_strategy(best.flags, best.fitness, isp_name)
                     active_strategy_id = record.id
                     _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl, config)
                     found_fix = bool(_active_process)
 
-            # ── Step 6: Report to server ─────────────────────────────
+            # ── Step 6: Per-host solving for remaining failures ───────
+            if found_fix and _active_process and _running:
+                time.sleep(2)
+                verify_after = _quick_connectivity_check(hosts)
+                still_failed = [h for h, ok_v in verify_after.items() if not ok_v]
+                if still_failed:
+                    ui.step(f"Step 6: Solving {len(still_failed)} remaining host(s)...")
+                    from brain.host_solver import HostSolver
+                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                    for fh in still_failed[:2]:
+                        result = solver.solve(fh, isp=isp_name)
+                        if result:
+                            ui.ok(f"Solved {fh}: fitness={result.fitness:.3f}")
+                    extra = solver.build_extra_profiles(lua_dir)
+                    if extra:
+                        _stop_permanent_zapret(_active_process)
+                        main_flags = best.flags if best else []
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, main_flags, hostlist,
+                            _tspu_recommended_ttl, config, extra_profiles=extra,
+                        )
+                        ui.ok(f"Restarted with {len(extra)//4} per-host profiles")
+
+            # ── Step 7: Report to server ──────────────────────────────
             if sync.is_configured:
                 sync.sync_now()
 
@@ -1556,16 +1590,47 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
             health = analytics.get_all_hosts_health(hosts, minutes=10)
             if health["degraded"]:
                 print(f"\n  [!] Blocking detected: {', '.join(health['degraded'])}")
-                print("  Starting DPI bypass...")
 
-                seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
-                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name)
+                best_flags = None
+                best_fitness = 0.0
 
-                if best and best.fitness > 0.1:
-                    manager.save_strategy(best.flags, best.fitness, isp_name)
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl, config)
+                # Step 1: Community instant strategy (~5 sec)
+                if sync.is_configured:
+                    print("  Trying community strategy...")
+                    community = sync.get_instant_strategy(isp_name)
+                    if community and community.get("flags"):
+                        fit = tester.test_strategy(community["flags"])
+                        if fit > 0.5:
+                            best_flags = community["flags"]
+                            best_fitness = fit
+                            print(f"  [OK] Community strategy: fitness={fit:.3f}")
+
+                # Step 2: Enumerator (~30 sec) if community failed
+                if not best_flags:
+                    print("  Running enumerator (25 strategies)...")
+                    from brain.enumerator import StrategyEnumerator
+                    enum = StrategyEnumerator()
+                    result = enum.enumerate(tester, threshold=0.5,
+                        on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
+                    if result:
+                        best_flags = result["flags"]
+                        best_fitness = result["fitness"]
+                        print(f"  [OK] Enumerator: {result['name']} fitness={best_fitness:.3f}")
+
+                # Step 3: GA evolution as last resort (~10-15 min)
+                if not best_flags:
+                    print("  Running GA evolution (last resort)...")
+                    seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
+                    best_result = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback)
+                    if best_result and best_result.fitness > 0.1:
+                        best_flags = best_result.flags
+                        best_fitness = best_result.fitness
+
+                if best_flags:
+                    manager.save_strategy(best_flags, best_fitness, isp_name)
+                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl, config)
                     if _active_process:
-                        print(f"\n  === DPI BYPASS ACTIVE (fitness={best.fitness:.3f}) ===\n")
+                        print(f"\n  === DPI BYPASS ACTIVE (fitness={best_fitness:.3f}) ===\n")
 
     _stop_permanent_zapret(_active_process)
     analytics.close()
@@ -1614,7 +1679,7 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
     return seeds
 
 
-def _run_evolution(tester, ga_config, seeds, analytics, isp_name) -> Optional:
+def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=None) -> Optional:
     """Run one GA evolution cycle with real testing."""
     from brain.genetic import StrategyGene, Individual
 
@@ -1623,8 +1688,8 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name) -> Optional:
     print("  Each strategy is tested with real connections.")
     print()
 
-    # Get excluded functions from AI feedback (global)
-    _excluded = ai_feedback.get_excluded_functions()
+    # Get excluded functions from AI feedback (if provided)
+    _excluded = ai_feedback.get_excluded_functions() if ai_feedback else []
     ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded)
 
     def on_gen(gen, best):
