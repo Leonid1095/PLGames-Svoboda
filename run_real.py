@@ -39,11 +39,21 @@ sys.path.insert(0, str(BASE_DIR))
 # ─── Safety: kill ALL winws2 on exit ─────────────────────────────────────────
 
 def _emergency_cleanup():
-    """Kill any remaining winws2/nfqws2 processes on exit.
+    """Kill any remaining winws2/nfqws2 processes on exit and restore system proxy.
 
     This prevents WinDivert driver from staying loaded after crash,
     which would break DNS and internet until reboot.
+    Also removes PAC proxy from registry so unblocked traffic stays direct.
     """
+    # Restore system proxy (remove PAC from registry)
+    if platform.system() == "Windows":
+        try:
+            from brain.proxy_router import ProxyRouter
+            router = ProxyRouter({})
+            router.clear_system_proxy()
+        except Exception:
+            pass
+
     if platform.system() == "Windows":
         try:
             subprocess.run(
@@ -90,6 +100,8 @@ from brain.profiler import ISPProfiler, ISP_SEED_STRATEGIES
 from brain.sync import ServerSync
 from brain.tester import ConnectionTester
 from brain.tier import TierManager
+
+logger = logging.getLogger("svoboda")
 
 # ─── Globals ──────────────────────────────────────────────────────────────────
 
@@ -588,6 +600,19 @@ def main():
     except Exception as exc:
         ui.warn(f"TSPU profiling error: {exc}")
 
+    # ─── ECH (Encrypted Client Hello) ──────────────────────────────
+    from brain.ech import ECHManager
+    ech = ECHManager(config)
+    _ech_ready = False
+    try:
+        if ech.setup():
+            _ech_ready = True
+            ui.ok(f"DoH ready (ECH system active)")
+        else:
+            ui.warn("DoH unavailable (ECH disabled)")
+    except Exception as exc:
+        logger.debug("ECH setup error: %s", exc)
+
     # ─── Smart block detection ──────────────────────────────────────
     from brain.block_classifier import BlockageClassifier
 
@@ -602,13 +627,15 @@ def main():
 
     blocked = {h: r for h, r in block_results.items() if r.block_type != "NOT_BLOCKED"}
     all_accessible = len(blocked) == 0
+    dpi_type = tspu_profile.dpi_type if tspu_profile else "unknown"
 
     if all_accessible:
         ui.ok("All sites accessible without DPI bypass.")
         print("  Starting monitoring mode (will activate if blocking detected)...")
         _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                          ai, sync, tier, profiler, isp_name, hostlist,
-                         ai_feedback=ai_feedback, tspu_profile=tspu_profile)
+                         ai_feedback=ai_feedback, tspu_profile=tspu_profile,
+                         dpi_type=dpi_type)
         analytics.close()
         return
 
@@ -616,16 +643,91 @@ def main():
     block_summary = {h: r.block_type for h, r in blocked.items()}
     print(f"\n  {len(blocked)} site(s) blocked: {', '.join(f'{h}={t}' for h, t in block_summary.items())}")
 
-    # Collect recommended strategies from classifier
+    # ─── Smart routing: separate SNI-blocked from IP-blocked ─────────
+    from brain.proxy_router import ProxyRouter
+    router = ProxyRouter(config)
+    routing_plan = router.plan_routing(blocked)
+
+    # Also check known IP-blocked services (AI, LinkedIn, etc.)
+    ip_test_hosts = config.get("ip_blocked_test_hosts", [])
+    if ip_test_hosts:
+        ip_extra_results = {}
+        for host in ip_test_hosts:
+            if host not in block_results:
+                analysis = classifier.classify(host)
+                if analysis.block_type != "NOT_BLOCKED":
+                    ip_extra_results[host] = analysis
+        if ip_extra_results:
+            extra_plan = router.plan_routing(ip_extra_results)
+            routing_plan.proxy_hosts.extend(extra_plan.proxy_hosts)
+            routing_plan.decisions.extend(extra_plan.decisions)
+
+    # Setup proxy for IP-blocked hosts (WARP → user VPS → instructions)
+    _proxy_ready = False
+    if routing_plan.proxy_hosts:
+        print(f"\n  {len(routing_plan.proxy_hosts)} IP-blocked site(s): {', '.join(routing_plan.proxy_hosts)}")
+        print("  (DPI bypass won't help — need proxy/tunnel)")
+        ui.step("Setting up proxy for IP-blocked sites...")
+
+        _proxy_ready = router.setup_proxy(routing_plan)
+        if _proxy_ready:
+            ui.ok(f"Proxy ready ({routing_plan.proxy_type}): {routing_plan.proxy_url}")
+            # Generate PAC file (selective: only blocked domains → SOCKS5, rest → DIRECT)
+            pac_path = router.generate_pac_file(routing_plan, BASE_DIR / "proxy.pac")
+            # System proxy auto-set: only via PAC (selective, not full proxy)
+            # PAC ensures only blocked domains go through proxy, all other traffic stays DIRECT
+            if pac_path:
+                if router.set_system_proxy(routing_plan, pac_path):
+                    ui.ok("System proxy set (only blocked domains routed, rest direct)")
+                else:
+                    # Can't set registry (no admin?) — show manual instructions
+                    print(f"  PAC file: {pac_path.resolve()}")
+                    print("  Set manually: Settings → Network → Proxy → Auto-config URL")
+            instructions = router.get_browser_instructions(routing_plan, pac_path)
+            if instructions:
+                print(instructions)
+        else:
+            instructions = router.get_browser_instructions(routing_plan)
+            if instructions:
+                print(instructions)
+
+    # Filter: only pass DPI-bypassable hosts to zapret2 pipeline
+    dpi_blocked = {h: r for h, r in blocked.items() if h in routing_plan.zapret2_hosts}
+    if not dpi_blocked and not routing_plan.zapret2_hosts:
+        # All blocked sites are IP-blocked, no DPI bypass needed
+        if _proxy_ready:
+            ui.ok("All blocked sites routed through proxy.")
+            print(f"\n  Monitoring... (Ctrl+C to stop)\n")
+            while _running:
+                time.sleep(1)
+            router.shutdown()
+            analytics.close()
+            return
+        else:
+            ui.warn("All sites are IP-blocked and no proxy available.")
+            print("  Install Cloudflare WARP (free): https://1.1.1.1/")
+            print("  Or add to config.json: \"user_proxy\": \"socks5://your-vps:port\"")
+            analytics.close()
+            input("  Press Enter to exit...")
+            return
+
+    # ─── ECH check for DPI-blocked hosts ──────────────────────────
+    if _ech_ready and dpi_blocked:
+        ech_domains = ech.get_ech_domains(list(dpi_blocked.keys()))
+        if ech_domains:
+            ui.ok(f"ECH available for: {', '.join(ech_domains)}")
+            print("  (Enable ECH in browser for invisible SNI encryption)")
+            print(ech.get_browser_ech_instructions())
+
+    # Collect recommended strategies from classifier (DPI-bypassable hosts only)
     classifier_strategies: list[list[str]] = []
-    for r in blocked.values():
+    for h, r in dpi_blocked.items():
         for s in r.recommended_strategies:
             if s not in classifier_strategies:
                 classifier_strategies.append(s)
 
     # ─── Initialize tester ──────────────────────────────────────────
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
-    dpi_type = tspu_profile.dpi_type if tspu_profile else "unknown"
 
     # ─── AI Engine — reserved for per-host solving after community/enum ──
     # Community + enum are free and fast. AI Engine uses LLM (rate limited).
@@ -781,7 +883,7 @@ def main():
         if community and community.get("flags"):
             print(f"\n  Trying community strategy (fitness={community['fitness']:.3f}, {community['report_count']} users)...")
             verified = tester.test_strategy(community["flags"])
-            if verified > 0.5:
+            if verified >= 0.45:
                 # Accept community but check if throttled — if so, try enum for better
                 is_good_enough = verified > 0.7  # >0.7 = no throttling, skip enum
                 if is_good_enough:
@@ -874,6 +976,19 @@ def main():
                             except Exception as exc:
                                 logger.debug("ByeDPI launch failed: %s", exc)
 
+                        # Save current strategy flags for restart after discovery
+                        _current_flags = list(community["flags"])
+
+                        # ── Discovery pipeline: auto-detect & solve new blocked domains ──
+                        from brain.discovery import DiscoveryPipeline
+                        from brain.host_solver import HostSolver
+                        _discovery_solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                        _discovery = DiscoveryPipeline(
+                            config, tester=tester, classifier=classifier,
+                            host_solver=_discovery_solver, proxy_router=router,
+                            server_sync=sync, isp=isp_name,
+                        )
+
                         # Watchdog loop with hostlist-auto monitoring
                         watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
                         _known_auto_hosts = set()
@@ -907,12 +1022,32 @@ def main():
                                     if new_domains:
                                         real_new = [d for d in new_domains if d.strip() and not d.startswith("#")]
                                         if real_new:
-                                            logger.info("hostlist-auto detected %d new blocked domains: %s",
-                                                        len(real_new), ", ".join(list(real_new)[:5]))
                                             print(f"  [{now}] New blocked domains detected: {', '.join(list(real_new)[:3])}")
+                                            # ── Discovery pipeline: classify → solve → report ──
+                                            # Stop zapret2 briefly to let solver test
+                                            _stop_permanent_zapret(_active_process)
+                                            _active_process = None
+                                            time.sleep(1)
+
+                                            disc_results = _discovery.process_new_domains(real_new)
+                                            for dr in disc_results:
+                                                if dr.solved:
+                                                    print(f"  [{now}] SOLVED: {dr.domain} → fitness={dr.fitness:.3f}"
+                                                          f"{' (shared)' if dr.reported_to_server else ''}")
+                                                elif dr.route == "proxy":
+                                                    print(f"  [{now}] {dr.domain} → IP-blocked (proxy needed)")
+                                                else:
+                                                    print(f"  [{now}] {dr.domain} → {dr.block_type} (unsolved)")
+
+                                            # Restart zapret2 with extra per-host profiles
+                                            extra = _discovery.get_extra_profiles()
+                                            _active_process = _start_permanent_zapret(
+                                                zapret_bin, lua_dir, _current_flags, hostlist,
+                                                _tspu_recommended_ttl, config, extra_profiles=extra,
+                                            )
                                         _known_auto_hosts = current_auto
-                                except Exception:
-                                    pass
+                                except Exception as exc:
+                                    logger.debug("Discovery pipeline error: %s", exc)
 
                             if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
                                 ui.warn("Health degraded, searching better strategy...")
@@ -1049,19 +1184,26 @@ def main():
         })
     priority_strategies.extend(KNOWN_STRATEGIES)
 
+    # Adaptive threshold: TSPU throttling caps fitness at ~0.50 with the old
+    # formula. After fixing throttle_ms and removing WS test, strategies
+    # typically score 0.55-0.70. Use lower threshold when TSPU is detected
+    # so enum finds a working strategy fast instead of falling to slow GA.
+    enum_threshold = 0.60
+    if tspu_profile and getattr(tspu_profile, 'dpi_type', None) and "tspu" in tspu_profile.dpi_type.lower():
+        enum_threshold = 0.45
+        ui.info(f"TSPU detected → acceptance threshold {enum_threshold}")
+
     print(f"\n  Fast strategy enumeration ({len(priority_strategies)} strategies, AI-prioritized)...")
     enumerator = StrategyEnumerator(strategies=priority_strategies, excluded_functions=excluded)
 
     def _enum_progress(i, total, name, fitness):
-        ui.enum_line(i, total, name, fitness, threshold=0.65)
+        ui.enum_line(i, total, name, fitness, threshold=enum_threshold)
 
     def _enum_record(flags, fitness):
         ai_feedback.record_test(flags, fitness, "ok" if fitness > 0.3 else "timeout")
 
-    # Threshold 0.65: reject throttled strategies (fitness ~0.46-0.55)
-    # Forces enum to try all 33 including Flowseal anti-throttle
     enum_result = enumerator.enumerate(
-        tester, threshold=0.65, on_progress=_enum_progress, on_result=_enum_record,
+        tester, threshold=enum_threshold, on_progress=_enum_progress, on_result=_enum_record,
     )
 
     if enum_result:
@@ -1191,7 +1333,7 @@ def main():
         ga_config.population_size = min(ga_config.population_size, 10)
         fitness_threshold = config.get("fitness_apply_threshold", 0.7)
 
-        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback)
+        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type)
 
     if not best or best.fitness < 0.1:
         print()
@@ -1487,7 +1629,7 @@ def main():
             if not found_fix:
                 ui.step("Step 5: GA evolution (last resort)...")
                 seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
-                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback)
+                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type)
                 if best and best.fitness > 0.1:
                     record = manager.save_strategy(best.flags, best.fitness, isp_name)
                     active_strategy_id = record.id
@@ -1543,7 +1685,7 @@ def main():
 
 def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                      ai, sync, tier, profiler, isp_name, hostlist=None,
-                     ai_feedback=None, tspu_profile=None):
+                     ai_feedback=None, tspu_profile=None, dpi_type: str = "unknown"):
     """Monitor connectivity and activate bypass if blocking detected."""
     global _running, _active_process
     interval = config.get("watchdog_interval_minutes", 5) * 60
@@ -1624,7 +1766,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                 if not best_flags:
                     print("  Running GA evolution (last resort)...")
                     seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
-                    best_result = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback)
+                    best_result = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type)
                     if best_result and best_result.fitness > 0.1:
                         best_flags = best_result.flags
                         best_fitness = best_result.fitness
@@ -1692,7 +1834,8 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
     return seeds
 
 
-def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=None) -> Optional:
+def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=None,
+                   dpi_type: str = "tspu") -> Optional:
     """Run one GA evolution cycle with real testing."""
     from brain.genetic import StrategyGene, Individual
 
@@ -1703,7 +1846,8 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=No
 
     # Get excluded functions from AI feedback (if provided)
     _excluded = ai_feedback.get_excluded_functions() if ai_feedback else []
-    ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded)
+    ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded,
+                      dpi_type=dpi_type, country="ru")
 
     def on_gen(gen, best):
         if not _running:

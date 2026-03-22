@@ -15,9 +15,13 @@ import random
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
+from brain.geneva import generate_seeds as geneva_seeds, mutate_flags_geneva
+
 logger = logging.getLogger("svoboda.genetic")
 
 # ─── Gene pool: zapret2 lua-desync functions and parameters ───────────────────
+# Extended with Geneva-inspired operators (duplicate via send, OOB injection,
+# IP fragmentation, aggressive seqovl for DPI buffer overflow).
 
 # Primary desync functions (at least one required per strategy)
 DESYNC_FUNCTIONS = [
@@ -29,11 +33,13 @@ DESYNC_FUNCTIONS = [
 ]
 
 # Secondary functions (can be combined with primary)
+# Geneva mapping: send=duplicate, drop=drop, oob=inject, pktmod=tamper
 SECONDARY_FUNCTIONS = [
-    "pktmod",       # apply fooling to current dissect
-    "wssize",       # modify window size
-    "drop",         # drop original (used after send)
-    "send",         # send current dissect with modifiers
+    "pktmod",       # tamper: modify packet fields (TTL, seq, checksum)
+    "wssize",       # modify window size (anti-H2 tracking)
+    "drop",         # drop original after sending modified copy
+    "send",         # duplicate: send current state with modifiers
+    "oob",          # Geneva inject: out-of-band TCP data (confuses DPI state)
 ]
 
 # Parameters for desync functions (key, possible values or range)
@@ -46,9 +52,12 @@ DESYNC_PARAMS = {
     "ip6_autottl": ["-1,3-20", "-2,3-20", "2,3-20"],
     "repeats": (1, 11),
 
-    # Split/disorder parameters
+    # Split/disorder parameters — expanded with compound positions
     "pos": ["1", "2", "3", "5", "midsld", "method+2", "endhost-1",
-            "1,midsld", "midsld,endhost-1"],
+            "1,midsld", "midsld,endhost-1",
+            # Geneva-inspired: multi-point fragmentation
+            "1,2", "1,3", "2,midsld", "3,midsld",
+            "1,midsld,endhost-1"],
 
     # Sequence manipulation (fooling)
     "tcp_seq": [-66000, -10000, -5000, 10000],
@@ -65,13 +74,15 @@ DESYNC_PARAMS = {
                 # Morphing: padencap adds TLS padding extension (anti-ML)
                 "rnd,rndsni,padencap", "rnd,rndsni,dupsid,padencap"],
 
-    # IP fragmentation
+    # IP fragmentation (Geneva: fragment at IP level)
     "ipfrag": None,
     "ipfrag_pos_udp": [8, 16, 24],
 
-    # Sequence overlap
+    # Sequence overlap — includes anti-throttle values
+    # Small (1-10): precise overlap, Large (568/681/4096): DPI buffer overflow
     "seqovl": (1, 10),
-    "seqovl_pattern": ["0x1603030000", "0x00000000"],
+    "seqovl_anti_throttle": [568, 681, 4096],
+    "seqovl_pattern": ["0x1603030000", "0x00000000", "fake_default_tls"],
 
     # Other
     "nofake1": None,
@@ -120,10 +131,13 @@ class StrategyGene:
     """Genetic algorithm for evolving zapret2 lua-desync strategies."""
 
     def __init__(self, config: GAConfig, seed_strategies: Optional[list[list[str]]] = None,
-                 excluded_functions: Optional[set[str]] = None):
+                 excluded_functions: Optional[set[str]] = None,
+                 dpi_type: str = "tspu", country: str = "ru"):
         self.config = config
         self.seed_strategies = seed_strategies or []
         self.excluded_functions = excluded_functions or set()
+        self.dpi_type = dpi_type
+        self.country = country
         self.population: list[Individual] = []
         self.generation: int = 0
         self.best_ever: Optional[Individual] = None
@@ -197,6 +211,20 @@ class StrategyGene:
             if self._stagnation_count >= 5:
                 self.config.mutation_rate = min(0.7, self._base_mutation_rate * 2)
                 logger.info("Stagnation detected, boosting mutation to %.2f", self.config.mutation_rate)
+                # Inject fresh Geneva strategies to break out of local optima
+                try:
+                    fresh = geneva_seeds(
+                        dpi_type=self.dpi_type, country=self.country,
+                        count=2, anti_throttle=True,
+                    )
+                    for fs in fresh[:2]:
+                        if len(self.population) > self.config.elite_size + 1:
+                            # Replace worst individuals with fresh Geneva seeds
+                            self.population[-1] = Individual(flags=list(fs))
+                            self.population.pop(-2) if len(self.population) > self.config.elite_size + 2 else None
+                    logger.info("Injected %d fresh Geneva strategies to break stagnation", len(fresh))
+                except Exception:
+                    pass
                 self._stagnation_count = 0
 
             # Create next generation
@@ -207,33 +235,112 @@ class StrategyGene:
     # ─── Population initialization ───────────────────────────────────────
 
     def _init_population(self) -> None:
-        """Create initial population."""
+        """Create initial population.
+
+        Seed priority:
+        1. Explicit seed_strategies (from cache, community, classifier)
+        2. Geneva academic strategies (country/DPI-specific known patterns)
+        3. Random generation (with 20% Geneva compound patterns)
+        """
         self.population = []
 
-        # Seed strategies first
+        # 1. Explicit seed strategies first
         for seed in self.seed_strategies[: self.config.population_size]:
             self.population.append(Individual(flags=list(seed)))
 
-        # Fill remaining with random strategies
+        # 2. Geneva seeds — known academic strategies for this country/DPI
+        if len(self.population) < self.config.population_size:
+            remaining = self.config.population_size - len(self.population)
+            geneva_count = min(remaining, max(2, self.config.population_size // 3))
+            try:
+                g_seeds = geneva_seeds(
+                    dpi_type=self.dpi_type,
+                    country=self.country,
+                    count=geneva_count,
+                    anti_throttle=True,
+                )
+                for gs in g_seeds:
+                    if len(self.population) >= self.config.population_size:
+                        break
+                    # Avoid duplicates
+                    if gs not in [ind.flags for ind in self.population]:
+                        self.population.append(Individual(flags=list(gs)))
+                logger.info("GA: seeded %d Geneva strategies (%s/%s)",
+                            len(g_seeds), self.country, self.dpi_type)
+            except Exception as exc:
+                logger.debug("Geneva seed generation failed: %s", exc)
+
+        # 3. Fill remaining with random strategies
         while len(self.population) < self.config.population_size:
             self.population.append(Individual(flags=self._random_strategy()))
 
     def _random_strategy(self) -> list[str]:
-        """Generate random zapret2 lua-desync strategy."""
+        """Generate random zapret2 lua-desync strategy.
+
+        Geneva-inspired patterns:
+        - fragment+reorder: multisplit+multidisorder (standard)
+        - duplicate+tamper: send(modified) + original (DPI sees modified, server sees real)
+        - inject+fragment: oob + multisplit (inject garbage into DPI state)
+        - flood+fragment: fake(high repeats) + multisplit (overwhelm DPI buffer)
+        """
         num_calls = random.randint(self.config.strategy_min_flags, self.config.strategy_max_flags)
         calls: list[str] = []
 
-        # First call must be a primary desync function
-        calls.append(self._random_desync_call())
-
-        # Additional calls
-        for _ in range(num_calls - 1):
-            if random.random() < 0.6:
-                calls.append(self._random_desync_call())
-            else:
-                calls.append(self._random_secondary_call())
+        # 20% chance: Geneva-style compound pattern instead of random
+        if random.random() < 0.2:
+            pattern = random.choice([
+                "inject_fragment",   # oob + split (confuse DPI state)
+                "duplicate_tamper",  # send(modified) + split (DPI sees garbage)
+                "flood_fragment",    # anti-throttle: large seqovl + disorder
+                "ipfrag_split",      # IP fragmentation + TLS split
+            ])
+            calls = self._geneva_pattern(pattern)
+        else:
+            # Standard generation
+            calls.append(self._random_desync_call())
+            for _ in range(num_calls - 1):
+                if random.random() < 0.6:
+                    calls.append(self._random_desync_call())
+                else:
+                    calls.append(self._random_secondary_call())
 
         return calls
+
+    def _geneva_pattern(self, pattern: str) -> list[str]:
+        """Generate a Geneva-inspired compound strategy pattern."""
+        if pattern == "inject_fragment":
+            # OOB data injection + fragment: DPI tries to reassemble OOB
+            # inline, corrupting its view of the TLS ClientHello
+            return [
+                "oob",
+                self._random_desync_call(),
+            ]
+        elif pattern == "duplicate_tamper":
+            # Send tampered copy + split: DPI processes tampered packet,
+            # server receives real fragments
+            ttl = random.randint(1, 4)
+            return [
+                f"send:ip_ttl={ttl}",
+                self._random_desync_call(),
+            ]
+        elif pattern == "flood_fragment":
+            # Anti-throttle: large seqovl overwhelms DPI state buffer +
+            # disorder prevents reassembly
+            seqovl = random.choice([568, 681, 4096])
+            pos = random.choice(["1", "midsld", "1,midsld"])
+            return [
+                f"multisplit:pos={pos}:seqovl={seqovl}",
+                f"multidisorder:pos=1,midsld",
+            ]
+        elif pattern == "ipfrag_split":
+            # IP-level fragmentation + TLS split: double fragmentation
+            # at different layers confuses stateful DPI
+            return [
+                "send:ipfrag",
+                self._random_desync_call(),
+            ]
+        # Fallback
+        return [self._random_desync_call()]
 
     def _random_desync_call(self) -> str:
         """Generate a random primary desync function call (respects AI exclusions)."""
@@ -286,8 +393,12 @@ class StrategyGene:
         elif func in ("multisplit", "multidisorder"):
             pos = random.choice(DESYNC_PARAMS["pos"])
             params.append(f"pos={pos}")
-            if random.random() < 0.3:
-                seqovl = random.randint(*DESYNC_PARAMS["seqovl"])
+            if random.random() < 0.4:  # 40% chance of seqovl (was 30%)
+                # 30% chance of anti-throttle large value (Geneva: buffer overflow)
+                if random.random() < 0.3:
+                    seqovl = random.choice(DESYNC_PARAMS["seqovl_anti_throttle"])
+                else:
+                    seqovl = random.randint(*DESYNC_PARAMS["seqovl"])
                 params.append(f"seqovl={seqovl}")
                 if random.random() < 0.5:
                     pat = random.choice(DESYNC_PARAMS["seqovl_pattern"])
@@ -311,8 +422,19 @@ class StrategyGene:
             params.append(f"scale={scale}")
 
         elif func == "send":
+            # Geneva duplicate: send modified copy before/after original
             if random.random() < 0.4:
                 params.append("ipfrag")
+            if random.random() < 0.3:
+                ttl = random.randint(1, 5)
+                params.append(f"ip_ttl={ttl}")
+
+        elif func == "oob":
+            # Geneva inject: out-of-band TCP data confuses DPI state machine.
+            # OOB byte is delivered out-of-band — server ignores it, but DPI
+            # may try to reassemble it inline, corrupting its view of the stream.
+            if random.random() < 0.5:
+                params.append(f"ip_ttl={random.randint(1, 5)}")
 
         return params
 
@@ -364,9 +486,22 @@ class StrategyGene:
         return child
 
     def _mutate(self, flags: list[str]) -> list[str]:
-        """Mutate: modify params, add/remove calls."""
+        """Mutate: modify params, add/remove calls.
+
+        25% chance of Geneva-aware mutation (understands operator semantics),
+        75% chance of standard random mutation.
+        """
         if random.random() > self.config.mutation_rate:
             return flags
+
+        # 25% chance: Geneva-aware semantic mutation
+        if random.random() < 0.25:
+            try:
+                new_flags = mutate_flags_geneva(flags, dpi_type=self.dpi_type)
+                if new_flags and new_flags != flags:
+                    return new_flags
+            except Exception:
+                pass  # fall through to standard mutation
 
         flags = list(flags)
         action = random.choice(["mutate_params", "replace_call", "add_call", "remove_call"])
@@ -410,7 +545,11 @@ class StrategyGene:
                 elif key == "repeats":
                     params[idx] = f"{key}={random.randint(1, 11)}"
                 elif key == "seqovl":
-                    params[idx] = f"{key}={random.randint(1, 10)}"
+                    # 30% chance: mutate to anti-throttle value
+                    if random.random() < 0.3:
+                        params[idx] = f"seqovl={random.choice(DESYNC_PARAMS['seqovl_anti_throttle'])}"
+                    else:
+                        params[idx] = f"{key}={random.randint(1, 10)}"
                 elif key == "pos":
                     params[idx] = f"pos={random.choice(DESYNC_PARAMS['pos'])}"
                 elif key == "tcp_seq":

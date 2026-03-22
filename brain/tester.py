@@ -115,8 +115,9 @@ class ConnectionTester:
         self._evo_timeout: int = min(self.timeout, 6)  # shorter timeout during evolution
         self._evo_trials: int = 1  # 1 trial per host during evolution (fast screening)
         # Throttle detection: threshold for marking a response as "throttled"
-        # TSPU throttles to ~8s. 3s threshold catches mild throttling early.
-        self._throttle_ms: int = config.get("throttle_threshold_ms", 3000)
+        # TSPU throttles to ~8s. 5s threshold avoids false positives on
+        # just-slow servers (3-4s is normal for international CDNs from RU).
+        self._throttle_ms: int = config.get("throttle_threshold_ms", 5000)
         self._base_dir = Path(config.get("_base_dir", "."))
         self._is_windows = platform.system() == "Windows"
         self._zapret_bin = self._resolve_zapret_binary()
@@ -147,8 +148,10 @@ class ConnectionTester:
         if self.mock:
             return self._test_mock(flags)
 
-        proc = self._start_shadow_zapret(flags)
-        if not proc:
+        self._start_shadow_zapret(flags)
+        time.sleep(1.5)
+
+        if self._shadow_process is None or self._shadow_process.poll() is not None:
             return 0.0
 
         try:
@@ -161,7 +164,7 @@ class ConnectionTester:
                 logger.debug("Single-host test %s: FAIL (%s)", host, r.error_type)
                 return 0.0
         finally:
-            self._stop_shadow_zapret(proc)
+            self._stop_shadow_zapret()
 
     # ─── Mock ──────────────────────────────────────────────────────────────
 
@@ -247,12 +250,17 @@ class ConnectionTester:
                     if r.success:
                         successful += 1
 
-                for host in self.hosts_ws:
-                    r = self._curl_test_websocket(host, timeout_override=timeout)
-                    all_results.append(r)
-                    total_tests += 1
-                    if r.success:
-                        successful += 1
+                # WebSocket test: only in thorough mode (trials > 1).
+                # curl WS upgrade is unreliable for Discord gateway — it needs
+                # a proper WS handshake, not HTTP Upgrade headers. Skipping in
+                # evolution avoids artificial ~0.10 fitness penalty per test.
+                if trials > 1:
+                    for host in self.hosts_ws:
+                        r = self._curl_test_websocket(host, timeout_override=timeout)
+                        all_results.append(r)
+                        total_tests += 1
+                        if r.success:
+                            successful += 1
 
         except Exception as exc:
             logger.error("Test failed: %s", exc)
@@ -343,7 +351,9 @@ class ConnectionTester:
 
         # 4. All-throttled penalty: if every success is throttled, add extra penalty.
         # This pushes fully-throttled strategies clearly below 0.5 threshold.
-        all_throttled_penalty = 0.15 if (successful > 0 and clean_success == 0) else 0.0
+        # Reduced from 0.15: TSPU always throttles bypass traffic, so this
+        # penalty was making ALL working strategies score below acceptance thresholds.
+        all_throttled_penalty = 0.08 if (successful > 0 and clean_success == 0) else 0.0
 
         fitness = (
             0.55 * success_rate

@@ -135,22 +135,94 @@ BLOCK_TYPES = {
 
 
 class BlockageClassifier:
-    """Classify how a site is blocked and recommend bypass strategies."""
+    """Classify how a site is blocked and recommend bypass strategies.
+
+    Smart detection: cross-references probe results with known IP-blocked
+    domains and performs DoH verification to distinguish SNI from IP blocks.
+    """
+
+    # Known IP-blocked domains: TSPU blocks at IP level, DPI bypass won't help.
+    # Maintained separately from proxy_router's list for classification accuracy.
+    _KNOWN_IP_BLOCKED = {
+        "openai.com", "api.openai.com", "chat.openai.com", "platform.openai.com",
+        "claude.ai", "api.anthropic.com", "anthropic.com",
+        "gemini.google.com", "bard.google.com",
+        "copilot.microsoft.com", "perplexity.ai",
+        "huggingface.co", "linkedin.com", "www.linkedin.com",
+        "medium.com", "archive.org", "protonmail.com", "proton.me",
+    }
 
     def __init__(self, timeout: int = 5):
         self.timeout = timeout
         self._is_windows = platform.system() == "Windows"
 
     def classify(self, host: str) -> BlockAnalysis:
-        """Run multi-stage probe to determine block type."""
+        """Run multi-stage probe to determine block type.
+
+        For known IP-blocked domains, skips full probe and returns IP_BLOCK
+        directly (saves time — DPI bypass won't help anyway).
+        For unknown domains, runs full probe + cross-check.
+        """
+        # Fast path: known IP-blocked domains
+        if self._is_known_ip_blocked(host):
+            # Quick verify: if somehow accessible, don't mark as blocked
+            if self._quick_https_check(host):
+                return BlockAnalysis(
+                    host=host, block_type="NOT_BLOCKED", confidence=0.90,
+                    evidence=["Known IP-blocked domain, but HTTPS works (VPN/WARP active?)"],
+                )
+            return BlockAnalysis(
+                host=host, block_type="IP_BLOCK", confidence=0.90,
+                evidence=[
+                    "Domain in known IP-blocked list",
+                    "DPI bypass ineffective — needs proxy/tunnel",
+                ],
+                recommended_strategies=[],
+                recommended_params={"needs_proxy": True},
+            )
+
         probe = self._probe_host(host)
         analysis = self._analyze_probe(probe)
+
+        # Cross-check: if classified as SNI but TCP also fails intermittently,
+        # it might be IP-level throttling masquerading as SNI block
+        if analysis.block_type == "SNI_FILTERING" and not probe.http_port80_ok and not probe.tcp_connect_ok:
+            analysis.block_type = "IP_BLOCK"
+            analysis.confidence = 0.75
+            analysis.evidence.append("Reclassified: TCP+HTTP both fail → likely IP block")
+            analysis.recommended_strategies = []
+            analysis.recommended_params = {"needs_proxy": True}
+
         logger.info(
             "Block analysis for %s: type=%s confidence=%.2f evidence=%s",
             host, analysis.block_type, analysis.confidence,
             "; ".join(analysis.evidence),
         )
         return analysis
+
+    def _is_known_ip_blocked(self, host: str) -> bool:
+        """Check if host is in known IP-blocked list."""
+        h = host.lower()
+        if h in self._KNOWN_IP_BLOCKED:
+            return True
+        for domain in self._KNOWN_IP_BLOCKED:
+            if h.endswith("." + domain):
+                return True
+        return False
+
+    def _quick_https_check(self, host: str) -> bool:
+        """Quick HTTPS check — used to verify if 'blocked' domain is actually reachable."""
+        try:
+            result = subprocess.run(
+                ["curl", "-s", "--max-time", "5", f"https://{host}",
+                 "-o", "NUL" if self._is_windows else "/dev/null",
+                 "-w", "%{http_code}"],
+                capture_output=True, text=True, timeout=8,
+            )
+            code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+            return code in {200, 301, 302, 303, 307, 308, 403, 404, 405, 429}
+        except Exception:
+            return False
 
     def classify_multiple(self, hosts: list[str]) -> dict[str, BlockAnalysis]:
         """Classify multiple hosts."""

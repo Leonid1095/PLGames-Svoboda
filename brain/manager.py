@@ -16,7 +16,7 @@ logger = logging.getLogger("svoboda.manager")
 
 VALID_FUNCTIONS = {
     "fake", "fakedsplit", "multisplit", "multidisorder", "syndata",
-    "pktmod", "wssize", "drop", "send",
+    "pktmod", "wssize", "drop", "send", "oob",
 }
 
 # ─── Migration: old --dpi-desync format → new lua-desync format ──────────────
