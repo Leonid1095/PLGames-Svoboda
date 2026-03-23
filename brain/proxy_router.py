@@ -57,6 +57,8 @@ IP_BLOCKED_DOMAINS = {
     "huggingface.co",
     # Social (some fully IP-blocked, not just SNI)
     "linkedin.com", "www.linkedin.com",
+    # Telegram Web (TCP OK, but all TLS to these IPs blocked)
+    "web.telegram.org", "telegram.org", "t.me",
     # Other
     "medium.com",
     "archive.org",
@@ -92,7 +94,7 @@ class ProxyRouter:
 
             # Check if this domain is known to be IP-blocked
             is_ip_blocked = (
-                bt == "IP_BLOCK"
+                bt in ("IP_BLOCK", "TLS_IP_BLOCK")
                 or self._is_known_ip_blocked(host)
                 or getattr(analysis, 'recommended_params', {}).get("needs_proxy", False)
             )

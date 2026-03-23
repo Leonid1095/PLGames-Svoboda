@@ -400,11 +400,36 @@ def _start_permanent_zapret(
             log.error("Permanent winws2 crashed: %s", stderr[:500])
             return None
         log.info("Permanent winws2 started (pid=%d)", proc.pid)
+        # Flush DNS cache so browser picks up real IPs instead of cached blocked
+        _flush_dns_cache()
         return proc
     except Exception as exc:
         print(f"  [ERROR] Failed to start winws2: {exc}")
         log.error("Permanent winws2 launch error: %s", exc)
         return None
+
+
+def _flush_dns_cache() -> None:
+    """Flush system DNS cache after zapret2 starts.
+
+    Without this, browsers (Chrome/Firefox) keep cached DNS responses from
+    the blocked state, causing 'works in incognito but not normal' symptom.
+    """
+    try:
+        if platform.system() == "Windows":
+            subprocess.run(
+                ["ipconfig", "/flushdns"],
+                capture_output=True, timeout=5,
+            )
+            log.debug("DNS cache flushed (ipconfig /flushdns)")
+        else:
+            # Linux: systemd-resolved
+            subprocess.run(
+                ["resolvectl", "flush-caches"],
+                capture_output=True, timeout=5,
+            )
+    except Exception:
+        pass  # non-critical
 
 
 def _stop_permanent_zapret(proc: Optional[subprocess.Popen]) -> None:

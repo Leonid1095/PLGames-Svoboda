@@ -149,10 +149,10 @@ class DiscoveryPipeline:
                 result.block_type = "SNI_FILTERING"
 
         # ── Step 2: Route based on block type ─────────────────────────
-        if result.block_type == "IP_BLOCK":
+        if result.block_type in ("IP_BLOCK", "TLS_IP_BLOCK"):
             # IP blocked → needs proxy, not zapret2
             result.route = "proxy"
-            logger.info("Discovery: %s is IP-blocked → proxy needed", domain)
+            logger.info("Discovery: %s is %s → proxy needed", domain, result.block_type)
 
             # Add to proxy router if available
             if self._router:

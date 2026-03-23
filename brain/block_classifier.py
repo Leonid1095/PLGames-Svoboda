@@ -124,6 +124,11 @@ BLOCK_TYPES = {
         "strategies": [],  # DPI bypass won't help
         "params": {"needs_proxy": True},
     },
+    "TLS_IP_BLOCK": {
+        "desc": "TCP works but all TLS to this IP is blocked (regardless of SNI)",
+        "strategies": [],  # DPI bypass won't help — needs proxy/tunnel
+        "params": {"needs_proxy": True},
+    },
     "TIMEOUT_SILENT": {
         "desc": "Connection silently dropped (no RST)",
         "strategies": [
@@ -144,12 +149,19 @@ class BlockageClassifier:
     # Known IP-blocked domains: TSPU blocks at IP level, DPI bypass won't help.
     # Maintained separately from proxy_router's list for classification accuracy.
     _KNOWN_IP_BLOCKED = {
+        # AI services
         "openai.com", "api.openai.com", "chat.openai.com", "platform.openai.com",
         "claude.ai", "api.anthropic.com", "anthropic.com",
         "gemini.google.com", "bard.google.com",
         "copilot.microsoft.com", "perplexity.ai",
-        "huggingface.co", "linkedin.com", "www.linkedin.com",
-        "medium.com", "archive.org", "protonmail.com", "proton.me",
+        "huggingface.co",
+        # Social/media
+        "linkedin.com", "www.linkedin.com",
+        "medium.com", "archive.org",
+        # Email
+        "protonmail.com", "proton.me",
+        # Telegram Web (TCP connects but all TLS blocked by TSPU)
+        "web.telegram.org", "telegram.org", "t.me",
     }
 
     def __init__(self, timeout: int = 5):
@@ -224,6 +236,33 @@ class BlockageClassifier:
         except Exception:
             return False
 
+    def _check_tls_without_sni(self, host: str) -> bool:
+        """Try TLS handshake WITHOUT sending SNI extension.
+
+        If TLS w/o SNI succeeds → DPI is filtering by SNI (SNI_FILTERING).
+        If TLS w/o SNI fails → DPI blocks all TLS to this IP (TLS_IP_BLOCK).
+
+        Uses Python ssl with no server_hostname to avoid SNI.
+        """
+        import socket as sock
+        import ssl
+
+        try:
+            ip = sock.gethostbyname(host)
+            ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+            s = sock.create_connection((ip, 443), timeout=5)
+            # wrap_socket WITHOUT server_hostname → no SNI extension sent
+            ss = ctx.wrap_socket(s)
+            ss.close()
+            logger.debug("TLS w/o SNI for %s (%s): OK → SNI_FILTERING", host, ip)
+            return True
+        except Exception as exc:
+            logger.debug("TLS w/o SNI for %s: FAIL (%s) → TLS_IP_BLOCK", host, exc)
+            return False
+
     def classify_multiple(self, hosts: list[str]) -> dict[str, BlockAnalysis]:
         """Classify multiple hosts."""
         return {host: self.classify(host) for host in hosts}
@@ -255,10 +294,18 @@ class BlockageClassifier:
         if probe.http_response_ok:
             self._check_h2_stream(host, probe)
 
-        # Override: if TCP connects but HTTPS times out → it's SNI, not IP
+        # Override: if TCP connects but HTTPS times out → need to distinguish
+        # SNI filtering from TLS-level IP block.
+        # Key test: TLS handshake WITHOUT SNI extension.
+        #   - If TLS w/o SNI succeeds → SNI_FILTERING (DPI reads SNI field)
+        #   - If TLS w/o SNI also fails → IP-level TLS block (DPI blocks all TLS to this IP)
         if probe.tcp_connect_ok and probe.timeout and not probe.http_response_ok:
-            probe.block_type = "SNI_FILTERING"
-            probe.confidence = 0.85
+            if self._check_tls_without_sni(host):
+                probe.block_type = "SNI_FILTERING"
+                probe.confidence = 0.90
+            else:
+                probe.block_type = "TLS_IP_BLOCK"
+                probe.confidence = 0.85
 
         return probe
 

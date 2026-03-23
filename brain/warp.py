@@ -149,14 +149,22 @@ class WarpManager:
             return False
 
         try:
-            # 1. Register if needed (first time)
+            # 1. Register if needed (first time or after daemon restart)
             if not self._is_registered():
-                logger.info("Registering WARP (first time)...")
+                logger.info("Registering WARP...")
+                # Clean up stale registration first
                 subprocess.run(
-                    [str(cli), "registration", "new"],
-                    capture_output=True, timeout=15,
+                    [str(cli), "registration", "delete"],
+                    capture_output=True, timeout=5,
                 )
                 time.sleep(1)
+                reg_result = subprocess.run(
+                    [str(cli), "registration", "new"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if reg_result.returncode != 0:
+                    logger.warning("WARP registration failed: %s", reg_result.stderr.strip())
+                time.sleep(2)
 
             # 2. Set proxy mode
             logger.info("Setting WARP to proxy mode (SOCKS5 on port %d)...", self._proxy_port)
@@ -171,22 +179,33 @@ class WarpManager:
                 capture_output=True, timeout=5,
             )
 
-            # 4. Connect
-            logger.info("Connecting WARP tunnel...")
-            subprocess.run(
-                [str(cli), "connect"],
-                capture_output=True, timeout=15,
-            )
-            time.sleep(2)
+            # 4. Connect (with retry)
+            for attempt in range(3):
+                logger.info("Connecting WARP tunnel (attempt %d/3)...", attempt + 1)
+                subprocess.run(
+                    [str(cli), "connect"],
+                    capture_output=True, timeout=15,
+                )
+                time.sleep(3)
 
-            # 5. Verify
-            if self.is_connected():
-                logger.info("WARP proxy ready at %s:%d", WARP_PROXY_HOST, self._proxy_port)
-                self._connected = True
-                return True
-            else:
-                logger.warning("WARP connect returned but status is not connected")
-                return False
+                # 5. Verify
+                if self.is_connected():
+                    logger.info("WARP proxy ready at %s:%d", WARP_PROXY_HOST, self._proxy_port)
+                    self._connected = True
+                    return True
+
+                # If registration lost between attempts, re-register
+                if not self._is_registered():
+                    logger.info("WARP registration lost, re-registering...")
+                    subprocess.run([str(cli), "registration", "delete"],
+                                   capture_output=True, timeout=5)
+                    time.sleep(1)
+                    subprocess.run([str(cli), "registration", "new"],
+                                   capture_output=True, timeout=15)
+                    time.sleep(2)
+
+            logger.warning("WARP failed to connect after 3 attempts")
+            return False
 
         except subprocess.TimeoutExpired:
             logger.warning("WARP setup timed out")
@@ -211,7 +230,7 @@ class WarpManager:
             pass
 
     def _is_registered(self) -> bool:
-        """Check if WARP has a registration."""
+        """Check if WARP has a valid registration."""
         cli = self.find_cli()
         if not cli:
             return False
@@ -220,7 +239,11 @@ class WarpManager:
                 [str(cli), "registration", "show"],
                 capture_output=True, text=True, timeout=5,
             )
-            return result.returncode == 0 and "account" in result.stdout.lower()
+            output = result.stdout.lower() + result.stderr.lower()
+            # Registration is valid if we see account info and no "missing" errors
+            if "missing" in output or "error" in output or "does not exist" in output:
+                return False
+            return result.returncode == 0 and ("account" in output or "registration" in output)
         except Exception:
             return False
 
