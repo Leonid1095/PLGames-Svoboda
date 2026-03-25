@@ -225,14 +225,22 @@ def _start_permanent_zapret(
     cmd = [str(binary)]
     is_win = platform.system() == "Windows"
     cwd = str(binary.parent) if is_win else None
+    _streamer_mode = config.get("streamer_mode", False) if config else False
 
     if is_win:
-        cmd.extend([
-            "--wf-tcp-out=80,443,2053,2083,2087,2096,8443",  # +Discord media ports
-            "--wf-udp-out=443,50000-50100",  # +Discord voice/video ports
-            # NOTE: --wf-tcp-in NOT needed! SYN-ACK/FIN/RST are captured
-            # automatically by WinDivert filter constructor.
-        ])
+        if _streamer_mode:
+            # Streamer mode: minimal WinDivert filter to reduce overhead.
+            # Only intercept TCP 80,443 — no extra UDP ports.
+            # This prevents latency spikes on OBS/streaming traffic.
+            cmd.extend([
+                "--wf-tcp-out=80,443",
+                "--wf-udp-out=443",
+            ])
+        else:
+            cmd.extend([
+                "--wf-tcp-out=80,443,2053,2083,2087,2096,8443",  # +Discord media ports
+                "--wf-udp-out=443,50000-50100",  # +Discord voice/video ports
+            ])
     else:
         cmd.extend(["--qnum=200"])
 
@@ -271,8 +279,14 @@ def _start_permanent_zapret(
                 local_auto.write_text("", encoding="utf-8")
             cmd.append("--hostlist=hostlist.txt")
             cmd.append("--hostlist-auto=hostlist-auto.txt")
-            cmd.append("--hostlist-auto-fail-threshold=3")
-            cmd.append("--hostlist-auto-fail-time=60")
+            if _streamer_mode:
+                # Streamer: high threshold prevents streaming CDNs from being
+                # accidentally added to auto-hostlist during normal packet loss
+                cmd.append("--hostlist-auto-fail-threshold=20")
+                cmd.append("--hostlist-auto-fail-time=120")
+            else:
+                cmd.append("--hostlist-auto-fail-threshold=3")
+                cmd.append("--hostlist-auto-fail-time=60")
             # Exclude Russian services (don't break yandex, vk, mail, etc.)
             exclude_src = Path(config.get("_base_dir", ".")) / "list-exclude.txt" if config else None
             if exclude_src and exclude_src.exists():
@@ -291,10 +305,20 @@ def _start_permanent_zapret(
     # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (all HTTPS except YouTube CDN)
     # ══════════════════════════════════════════════════════════════
+    _yt_cdn_exclude = "googlevideo.com,googleapis.com,ggpht.com,ytimg.com"
+    if _streamer_mode:
+        # Streamer: also exclude streaming/ingest CDNs from desync
+        _yt_cdn_exclude += (
+            ",live.twitch.tv,video-edge.abs.hls.ttvnw.net,usher.ttvnw.net"
+            ",ingest.twitch.tv,video-weaver.twitch.tv"
+            ",upload.youtube.com,obsproject.com"
+            ",live-api-s.facebook.com,edgevideo.svc.7sn.net"
+            ",akamaihd.net,cloudfront.net"  # common CDN
+        )
     cmd.extend([
         "--filter-tcp=443",
         "--filter-l7=tls",
-        "--hostlist-exclude-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com",
+        f"--hostlist-exclude-domains={_yt_cdn_exclude}",
     ])
     # Traffic morphing: browser-like TCP window
     morph_calls = morpher.get_permanent_calls()
@@ -333,23 +357,25 @@ def _start_permanent_zapret(
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 4: Discord media (TCP ports 2053-8443)
+    # Streamer mode: skip — these ports add WinDivert overhead
     # ══════════════════════════════════════════════════════════════
-    cmd.extend([
-        "--new",
-        "--filter-tcp=2053,2083,2087,2096,8443",
-        "--filter-l7=tls",
-    ])
-    for call in flags:
-        cmd.append(f"--lua-desync={call}")
+    if not _streamer_mode:
+        cmd.extend([
+            "--new",
+            "--filter-tcp=2053,2083,2087,2096,8443",
+            "--filter-l7=tls",
+        ])
+        for call in flags:
+            cmd.append(f"--lua-desync={call}")
 
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 5: Discord voice (UDP 50000-50100)
-    # ══════════════════════════════════════════════════════════════
-    cmd.extend([
-        "--new",
-        "--filter-udp=50000-50100",
-        f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=12",
-    ])
+        # ══════════════════════════════════════════════════════════════
+        # PROFILE 5: Discord voice (UDP 50000-50100)
+        # ══════════════════════════════════════════════════════════════
+        cmd.extend([
+            "--new",
+            "--filter-udp=50000-50100",
+            f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=12",
+        ])
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 6: QUIC (YouTube video + other UDP/443)
@@ -380,6 +406,20 @@ def _start_permanent_zapret(
     # Add extra per-host profiles if any
     if extra_profiles:
         cmd.extend(extra_profiles)
+
+    # Kill any existing winws2 before starting new one (prevents dual-process conflicts)
+    # This is critical for early-start → full-start replacement
+    try:
+        if is_win:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "winws2.exe"],
+                capture_output=True, timeout=5,
+            )
+        else:
+            subprocess.run(["pkill", "-f", "nfqws2"], capture_output=True, timeout=5)
+        time.sleep(1)  # wait for WinDivert driver to unload
+    except Exception:
+        pass
 
     log = logging.getLogger("svoboda")
     log.info("Permanent winws2 cmd: %s", " ".join(cmd))
@@ -430,6 +470,37 @@ def _flush_dns_cache() -> None:
             )
     except Exception:
         pass  # non-critical
+
+
+def _restart_stuck_apps() -> None:
+    """Restart apps that cache connection failures (Discord updater, etc.).
+
+    Problem: if Discord was started before zapret2, its updater hangs on
+    'Checking for updates' and never retries. Standard zapret2 doesn't have
+    this issue because it runs as a Windows service (starts before apps).
+
+    Solution: kill the updater process so Discord restarts it fresh,
+    now routing through the active zapret2.
+    """
+    if platform.system() != "Windows":
+        return
+    log = logging.getLogger("svoboda")
+
+    # Discord: kill Update.exe (updater). Discord's main process will
+    # detect it died and relaunch it — this time through working zapret2.
+    try:
+        check = subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq Update.exe"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "Update.exe" in check.stdout:
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "Update.exe"],
+                capture_output=True, timeout=5,
+            )
+            log.info("Restarted Discord updater (was stuck before zapret2)")
+    except Exception:
+        pass
 
 
 def _stop_permanent_zapret(proc: Optional[subprocess.Popen]) -> None:
@@ -523,6 +594,17 @@ def main():
     config = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
     config["_base_dir"] = str(BASE_DIR)
 
+    # ─── Streamer mode toggle ─────────────────────────────────────────
+    # Streamer mode reduces WinDivert overhead for OBS/streaming:
+    #   - Minimal packet interception (only TCP 80,443 + UDP 443)
+    #   - High auto-hostlist threshold (won't capture CDN on packet loss)
+    #   - Streaming CDN excludes (Twitch, YouTube ingest, etc.)
+    # Toggle via config.json "streamer_mode": true or launch arg --streamer
+    if "--streamer" in sys.argv:
+        config["streamer_mode"] = True
+    if config.get("streamer_mode"):
+        print("  [STREAMER] Low-overhead mode (streaming CDNs excluded)")
+
     # ─── Logging ──────────────────────────────────────────────────────
     log = logging.getLogger("svoboda")
     log.setLevel(logging.DEBUG)
@@ -609,6 +691,68 @@ def main():
     print()
     hostlist = _download_hostlist(BASE_DIR)
 
+    # ─── Early Start: apply cached strategy + validate immediately ───
+    # Problem: if cached strategy is stale, apps (Discord, browser) connect
+    # through broken zapret2, cache the failure internally, and then even
+    # after we find a working strategy they won't retry → "incognito only".
+    # Solution: start cached → quick-validate → if stale, kill immediately
+    # and try top community/enum strategies before full analysis.
+    _early_process = None
+    _early_validated = False
+    cached_best = manager.get_best_strategy(isp_name)
+    if cached_best and cached_best.fitness > 0.3:
+        print(f"\n  Quick-start with cached strategy (fitness={cached_best.fitness:.3f})...")
+        _early_process = _start_permanent_zapret(
+            zapret_bin, lua_dir, cached_best.flags, hostlist,
+            4,  # default TTL, will be refined after TSPU profiling
+            config,
+        )
+        if _early_process:
+            _active_process = _early_process
+            # Quick-validate: 1 curl to youtube (8s max)
+            time.sleep(2)  # let WinDivert load
+            _validate_host = config.get("test_hosts", ["youtube.com"])[0]
+            _vr = _curl_check_one(_validate_host, timeout=6)
+            if _vr["success"]:
+                _early_validated = True
+                ui.ok(f"DPI bypass active (cached strategy works)")
+                _restart_stuck_apps()
+            else:
+                # Stale strategy — kill immediately so apps don't cache failures
+                print(f"  [!] Cached strategy stale — trying fallback...")
+                _stop_permanent_zapret(_early_process)
+                _active_process = None
+                _early_process = None
+
+                # Fast fallback: try top 5 enum strategies (~30s total)
+                from brain.enumerator import StrategyEnumerator
+                _fb_enum = StrategyEnumerator()
+                _fb_found = False
+                for _fb_i, _fb_s in enumerate(_fb_enum.strategies[:5]):
+                    _fb_proc = _start_permanent_zapret(
+                        zapret_bin, lua_dir, _fb_s["flags"], hostlist, 4, config,
+                    )
+                    if not _fb_proc:
+                        continue
+                    time.sleep(2)
+                    _fb_vr = _curl_check_one(_validate_host, timeout=6)
+                    if _fb_vr["success"]:
+                        _active_process = _fb_proc
+                        _early_validated = True
+                        _fb_found = True
+                        ui.ok(f"DPI bypass active (fallback: {_fb_s['name']})")
+                        _restart_stuck_apps()
+                        # Save this working strategy for next time
+                        manager.save_strategy(_fb_s["flags"], 0.5, isp_name)
+                        break
+                    else:
+                        _stop_permanent_zapret(_fb_proc)
+
+                if not _fb_found:
+                    print("  [!] No quick fallback worked — full analysis needed")
+    else:
+        print("\n  No cached strategy — full analysis needed...")
+
     # ─── TSPU Profiling ─────────────────────────────────────────────
     from brain.tspu_profiler import TSPUProfiler
     tspu_profile = None
@@ -694,7 +838,7 @@ def main():
         print("  (DPI bypass won't help — need proxy/tunnel)")
         ui.step("Setting up proxy for IP-blocked sites...")
 
-        _proxy_ready = router.setup_proxy(routing_plan)
+        _proxy_ready = router.setup_proxy(routing_plan, tier=tier)
         if _proxy_ready:
             ui.ok(f"Proxy ready ({routing_plan.proxy_type}): {routing_plan.proxy_url}")
             # Generate PAC file (selective: only blocked domains → SOCKS5, rest → DIRECT)
@@ -1133,6 +1277,7 @@ def main():
                     print(f"    {host}: {'OK' if ok else 'FAIL'}")
                 if working > 0:
                     print(f"\n  === DPI BYPASS ACTIVE ({working}/{total} sites) ===")
+                    _restart_stuck_apps()
                     print(f"\n  Tier:     {tier.get_status_line()}")
                     print(f"  Donate:   {donate.page_url}")
                     print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
@@ -1258,6 +1403,7 @@ def main():
 
             if working > 0:
                 print(f"\n  === DPI BYPASS ACTIVE ({working}/{total_h} sites) ===")
+                _restart_stuck_apps()
                 print(f"\n  Strategy: {' | '.join(best_flags)}")
                 print(f"  Tier:     {tier.get_status_line()}")
                 print(f"  Donate:   {donate.page_url}")
@@ -1429,6 +1575,7 @@ def main():
     else:
         print()
         print(f"  === DPI BYPASS ACTIVE ({working}/{total} sites) ===")
+        _restart_stuck_apps()
         print()
         print(f"  Tier:     {tier.get_status_line()}")
         print(f"  Donate:   {donate.page_url}")
@@ -1801,6 +1948,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                     _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl, config)
                     if _active_process:
                         print(f"\n  === DPI BYPASS ACTIVE (fitness={best_fitness:.3f}) ===\n")
+                        _restart_stuck_apps()
 
     _stop_permanent_zapret(_active_process)
     analytics.close()

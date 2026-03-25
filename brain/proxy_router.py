@@ -72,6 +72,7 @@ class ProxyRouter:
     def __init__(self, config: dict):
         self.config = config
         self._warp = None
+        self._gost_tunnel = None
         self._user_proxy: str = config.get("user_proxy", "")
         self._is_windows = platform.system() == "Windows"
 
@@ -115,16 +116,34 @@ class ProxyRouter:
 
         return plan
 
-    def setup_proxy(self, plan: RoutingPlan) -> bool:
+    def setup_proxy(self, plan: RoutingPlan, tier=None) -> bool:
         """Set up proxy for IP-blocked hosts. Returns True if proxy is ready.
 
         Priority:
+        0. PLGames VPS proxy (PRO tier — included in subscription)
         1. User's VPS proxy (fastest, user controls)
         2. Cloudflare WARP (free, autonomous)
         3. ByeDPI (local, limited)
         """
         if not plan.proxy_hosts:
             return True  # nothing to proxy
+
+        # 0. PLGames VPS proxy via gost TLS tunnel (PRO tier or owner)
+        if tier and tier.has_vps_proxy:
+            plgames_proxy = tier.proxy_url
+            if plgames_proxy:
+                local_proxy = self._start_gost_tunnel(plgames_proxy, plan.proxy_hosts[0])
+                if local_proxy:
+                    plan.proxy_url = local_proxy
+                    plan.proxy_type = "plgames_vps"
+                    for d in plan.decisions:
+                        if d.route == "proxy":
+                            d.proxy_url = local_proxy
+                            d.route = "plgames_vps"
+                    logger.info("Using PLGames VPS proxy (TLS tunnel): %s", local_proxy)
+                    return True
+                else:
+                    logger.warning("PLGames VPS proxy unavailable, trying alternatives...")
 
         # 1. Try user's own proxy
         if self._user_proxy:
@@ -191,8 +210,10 @@ class ProxyRouter:
         if not plan.proxy_url or not plan.proxy_hosts:
             return None
 
-        # Parse SOCKS5 URL
+        # Parse SOCKS5 URL (strip auth for PAC — PAC doesn't support auth)
         proxy_addr = plan.proxy_url.replace("socks5://", "")
+        if "@" in proxy_addr:
+            proxy_addr = proxy_addr.split("@", 1)[1]  # host:port only
 
         domains_js = ",\n    ".join(f'"{h}": 1' for h in plan.proxy_hosts)
 
@@ -241,35 +262,47 @@ function FindProxyForURL(url, host) {{
             return ""
 
         if plan.proxy_url:
-            lines.append(f"  SOCKS5 proxy: {plan.proxy_url} ({plan.proxy_type})")
+            # Display URL without password in output
+            _display_url = plan.proxy_url
+            if "@" in _display_url:
+                _scheme, _rest = _display_url.split("://", 1)
+                _hostport = _rest.split("@", 1)[1]
+                _display_url = f"{_scheme}://*:*@{_hostport}"
+            lines.append(f"  SOCKS5 proxy: {_display_url} ({plan.proxy_type})")
             lines.append(f"  Proxied domains: {', '.join(plan.proxy_hosts)}")
+
+            # Parse host:port for instructions (strip auth)
+            _raw = plan.proxy_url.replace("socks5://", "").replace("socks5h://", "")
+            if "@" in _raw:
+                _auth, _hp = _raw.split("@", 1)
+            else:
+                _auth, _hp = "", _raw
 
             if pac_path:
                 pac_url = pac_path.as_uri() if hasattr(pac_path, 'as_uri') else f"file:///{pac_path}"
                 lines.append(f"\n  Auto-config (PAC): {pac_url}")
                 lines.append("  Set as system proxy: Settings → Network → Proxy → Auto-config URL")
 
-            lines.append(f"\n  Manual browser setup:")
-            lines.append(f"    Chrome: Settings → System → Proxy → SOCKS5 Host={plan.proxy_url.split('//')[1]}")
-            lines.append(f"    Firefox: Settings → Network → Manual proxy → SOCKS5 {plan.proxy_url.split('//')[1]}")
-
-            if any("discord" in h for h in plan.proxy_hosts):
-                host_port = plan.proxy_url.replace("socks5://", "").split(":")
-                lines.append(f"\n    Discord: Settings → Advanced → SOCKS5 {host_port[0]}:{host_port[1]}")
-
             if any("telegram" in h for h in plan.proxy_hosts):
-                host_port = plan.proxy_url.replace("socks5://", "").split(":")
-                lines.append(f"    Telegram: Settings → Data → Proxy → SOCKS5 {host_port[0]}:{host_port[1]}")
+                lines.append(f"\n    Telegram: Settings → Advanced → Proxy → SOCKS5")
+                lines.append(f"      Server: {_hp.split(':')[0]}  Port: {_hp.split(':')[1] if ':' in _hp else '1080'}")
+                if _auth and ":" in _auth:
+                    lines.append(f"      Username: {_auth.split(':')[0]}  Password: {_auth.split(':')[1]}")
 
         if plan.unroutable_hosts:
             lines.append(f"\n  [!] Cannot route (need VPN/proxy): {', '.join(plan.unroutable_hosts)}")
+            lines.append(f"      Add to config.json: \"user_proxy\": \"socks5://your-vps:port\"")
+            lines.append(f"      Or SSH tunnel: ssh -D 1080 user@your-vps")
+            # Check if WARP is blocked vs not installed
             try:
                 from brain.warp import WarpManager
-                if not WarpManager().is_available():
-                    lines.append(f"      Install Cloudflare WARP (free): https://1.1.1.1/")
-                    lines.append(f"      Or set user_proxy in config.json: \"user_proxy\": \"socks5://your-vps:port\"")
+                warp = WarpManager()
+                if warp.is_available() and warp._is_blocked_by_isp():
+                    lines.append(f"      (WARP blocked by ISP — use VPS proxy instead)")
+                elif not warp.is_available():
+                    lines.append(f"      Or install Cloudflare WARP (free): https://1.1.1.1/")
             except Exception:
-                lines.append(f"      Set user_proxy in config.json: \"user_proxy\": \"socks5://your-vps:port\"")
+                pass
 
         return "\n".join(lines)
 
@@ -412,11 +445,43 @@ function FindProxyForURL(url, host) {{
             pass
 
     def shutdown(self) -> None:
-        """Clean up: remove system proxy if we set it, keep WARP running."""
+        """Clean up: remove system proxy, stop gost tunnel."""
         if self._is_windows and hasattr(self, '_old_proxy_pac'):
             self.clear_system_proxy()
+        if self._gost_tunnel:
+            self._gost_tunnel.stop()
+            self._gost_tunnel = None
 
     # ─── Internal ─────────────────────────────────────────────────────
+
+    def _start_gost_tunnel(self, plgames_proxy: str, test_host: str) -> Optional[str]:
+        """Start gost TLS tunnel and return local proxy URL if working.
+
+        Returns socks5://127.0.0.1:PORT or None if failed.
+        """
+        try:
+            from brain.gost_tunnel import GostTunnel
+
+            self._gost_tunnel = GostTunnel(self.config, proxy_url=plgames_proxy, local_port=1082)
+            if not self._gost_tunnel.start():
+                self._gost_tunnel = None
+                return None
+
+            local_url = self._gost_tunnel.local_proxy_url
+            # Test if tunnel actually reaches the target
+            if self._test_proxy(local_url, test_host):
+                return local_url
+
+            logger.warning("Gost tunnel started but cannot reach %s", test_host)
+            self._gost_tunnel.stop()
+            self._gost_tunnel = None
+            return None
+        except Exception as exc:
+            logger.warning("Gost tunnel setup failed: %s", exc)
+            if self._gost_tunnel:
+                self._gost_tunnel.stop()
+                self._gost_tunnel = None
+            return None
 
     def _is_known_ip_blocked(self, host: str) -> bool:
         """Check if host is in the known IP-blocked list."""
@@ -430,14 +495,16 @@ function FindProxyForURL(url, host) {{
         return False
 
     def _test_proxy(self, proxy_url: str, test_host: str) -> bool:
-        """Test if a SOCKS5 proxy can reach a host."""
+        """Test if a SOCKS5 proxy can reach a host.
+
+        Supports auth: socks5://user:pass@host:port
+        """
         try:
-            # Parse socks5://host:port
-            addr = proxy_url.replace("socks5://", "").replace("socks5h://", "")
+            # curl --proxy handles full URL with auth natively
             result = subprocess.run(
                 [
                     "curl", "-s", "--max-time", "10",
-                    "--socks5-hostname", addr,
+                    "--proxy", proxy_url,
                     f"https://{test_host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
                     "-w", "%{http_code}",
@@ -445,6 +512,11 @@ function FindProxyForURL(url, host) {{
                 capture_output=True, text=True, timeout=15,
             )
             code = int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
-            return code in {200, 301, 302, 307, 308, 403, 404, 405, 429}
-        except Exception:
+            success = code in {200, 301, 302, 307, 308, 403, 404, 405, 429}
+            if success:
+                logger.info("Proxy test OK: %s → HTTP %d via %s",
+                           test_host, code, proxy_url.split("@")[-1] if "@" in proxy_url else proxy_url)
+            return success
+        except Exception as exc:
+            logger.debug("Proxy test failed: %s", exc)
             return False

@@ -17,6 +17,7 @@ License flow:
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import time
@@ -35,6 +36,7 @@ TIERS = {
         "ai_interval_seconds": 86400,       # 24 hours
         "ai_auto_test": False,
         "priority_strategies": False,
+        "vps_proxy": False,
     },
     "supporter": {
         "name": "Supporter",
@@ -43,6 +45,7 @@ TIERS = {
         "ai_interval_seconds": 7200,         # 2 hours
         "ai_auto_test": True,
         "priority_strategies": True,
+        "vps_proxy": False,
     },
     "pro": {
         "name": "Pro",
@@ -51,6 +54,7 @@ TIERS = {
         "ai_interval_seconds": 1800,         # 30 minutes
         "ai_auto_test": True,
         "priority_strategies": True,
+        "vps_proxy": True,              # PLGames VPS proxy for IP-blocked sites
     },
 }
 
@@ -104,6 +108,55 @@ class TierManager:
         """Whether current tier gets priority strategies."""
         return self.tier_config["priority_strategies"]
 
+    @property
+    def has_vps_proxy(self) -> bool:
+        """Whether current tier has PLGames VPS proxy for IP-blocked sites."""
+        if self._is_owner():
+            return True
+        return self.tier_config.get("vps_proxy", False)
+
+    @property
+    def proxy_url(self) -> Optional[str]:
+        """VPS proxy URL — only available for PRO/owner tier.
+
+        Sources (priority):
+          1. Server-delivered in license response (rotatable, secure)
+          2. Embedded fallback for owner (obfuscated, pre-sync bootstrap)
+
+        Returns None if not authorized or unavailable.
+        """
+        if not self.has_vps_proxy:
+            return None
+
+        # 1. Server-delivered credentials (preferred — rotatable)
+        if self._license:
+            server_url = self._license.get("proxy_url")
+            if server_url:
+                return server_url
+
+        # 2. Owner fallback (before first sync delivers fresh creds)
+        if self._is_owner():
+            return self._decode_embedded_proxy()
+
+        return None
+
+    @staticmethod
+    def _decode_embedded_proxy() -> str:
+        """Decode embedded proxy URL (owner bootstrap fallback)."""
+        _d = "ABlTCUNRW1xZQA5XBQwWBQpTBzADARldK0cuLT4VQCRSJBEBGUgbHhcXEhRfBlFJEhsBVUxfCg0aGFVYBFBS"
+        _k = b"sv0b0da"
+        raw = base64.b64decode(_d)
+        return bytes(b ^ _k[i % len(_k)] for i, b in enumerate(raw)).decode()
+
+    def _is_owner(self) -> bool:
+        """Check if this is the product owner's install (always PRO features)."""
+        if not self._license:
+            # Check install_id from config for owner bypass
+            owner_ids = self._config.get("_owner_ids", [])
+            install_id = self._config.get("install_id", "")
+            return install_id in owner_ids
+        return self._license.get("tier") == "owner"
+
     def should_run_ai_scan(self) -> bool:
         """Check if enough time has passed for next AI scan."""
         now = time.time()
@@ -130,9 +183,9 @@ class TierManager:
             return f"[FREE] AI: {cfg['ai_model_display']} (1x/day)"
         elif t == "supporter":
             return f"[SUPPORTER] AI: {cfg['ai_model_display']} (every 2h) + auto-test"
-        elif t == "pro":
-            until = self._license.get("until", "?") if self._license else "?"
-            return f"[PRO] AI: {cfg['ai_model_display']} (every 30min) + auto-test | until {until}"
+        elif t == "pro" or self._is_owner():
+            until = self._license.get("until", "~") if self._license else "owner"
+            return f"[PRO] AI: {cfg['ai_model_display']} + VPS proxy + auto-test | {until}"
         return f"[{t.upper()}]"
 
     # ─── Internal ──────────────────────────────────────────────────────────

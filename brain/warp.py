@@ -136,6 +136,38 @@ class WarpManager:
 
     # ─── Setup ────────────────────────────────────────────────────────
 
+    def _is_blocked_by_isp(self) -> bool:
+        """Quick check if WARP protocol is blocked by ISP.
+
+        If daemon is stuck in 'Connecting' or reports 'Unable'/'happy eyeballs',
+        the ISP is blocking WireGuard/MASQUE — no point retrying.
+        """
+        cli = self.find_cli()
+        if not cli:
+            return False
+        try:
+            result = subprocess.run(
+                [str(cli), "status"],
+                capture_output=True, text=True, timeout=5,
+            )
+            output = result.stdout.lower() + result.stderr.lower()
+            if "unable" in output or "happy eyeballs" in output:
+                return True
+            # If stuck in "Connecting" for a while, also blocked
+            if "connecting" in output and "disconnected" not in output:
+                # Wait 5s and recheck — if still connecting, it's blocked
+                time.sleep(5)
+                result2 = subprocess.run(
+                    [str(cli), "status"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                output2 = result2.stdout.lower()
+                if "connecting" in output2 or "unable" in output2:
+                    return True
+            return False
+        except Exception:
+            return False
+
     def ensure_proxy_mode(self) -> bool:
         """Set WARP to proxy mode and connect. Returns True if SOCKS5 proxy is ready.
 
@@ -148,11 +180,15 @@ class WarpManager:
             logger.warning("WARP CLI not found")
             return False
 
+        # Fast-fail: if WARP protocol is blocked by ISP, don't waste time
+        if self._is_blocked_by_isp():
+            logger.warning("WARP blocked by ISP (WireGuard/MASQUE unreachable)")
+            return False
+
         try:
             # 1. Register if needed (first time or after daemon restart)
             if not self._is_registered():
                 logger.info("Registering WARP...")
-                # Clean up stale registration first
                 subprocess.run(
                     [str(cli), "registration", "delete"],
                     capture_output=True, timeout=5,
@@ -179,32 +215,27 @@ class WarpManager:
                 capture_output=True, timeout=5,
             )
 
-            # 4. Connect (with retry)
-            for attempt in range(3):
-                logger.info("Connecting WARP tunnel (attempt %d/3)...", attempt + 1)
-                subprocess.run(
-                    [str(cli), "connect"],
-                    capture_output=True, timeout=15,
-                )
-                time.sleep(3)
+            # 4. Connect — single attempt with fast check
+            logger.info("Connecting WARP tunnel...")
+            subprocess.run(
+                [str(cli), "connect"],
+                capture_output=True, timeout=10,
+            )
+            time.sleep(3)
 
-                # 5. Verify
-                if self.is_connected():
-                    logger.info("WARP proxy ready at %s:%d", WARP_PROXY_HOST, self._proxy_port)
-                    self._connected = True
-                    return True
+            if self.is_connected():
+                logger.info("WARP proxy ready at %s:%d", WARP_PROXY_HOST, self._proxy_port)
+                self._connected = True
+                return True
 
-                # If registration lost between attempts, re-register
-                if not self._is_registered():
-                    logger.info("WARP registration lost, re-registering...")
-                    subprocess.run([str(cli), "registration", "delete"],
-                                   capture_output=True, timeout=5)
-                    time.sleep(1)
-                    subprocess.run([str(cli), "registration", "new"],
-                                   capture_output=True, timeout=15)
-                    time.sleep(2)
+            # One more check: might be ISP blocking
+            if self._is_blocked_by_isp():
+                logger.warning("WARP blocked by ISP after connect attempt")
+                # Disconnect to prevent daemon from hogging DNS/network
+                subprocess.run([str(cli), "disconnect"], capture_output=True, timeout=5)
+                return False
 
-            logger.warning("WARP failed to connect after 3 attempts")
+            logger.warning("WARP failed to connect")
             return False
 
         except subprocess.TimeoutExpired:
