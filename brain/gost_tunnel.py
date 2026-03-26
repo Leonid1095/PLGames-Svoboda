@@ -27,9 +27,18 @@ logger = logging.getLogger("svoboda.gost")
 
 # gost release — single binary, no installer
 _GOST_VERSION = "3.0.0-nightly.20250101"
-_GOST_DOWNLOAD_BASE = "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20250101"
 _GOST_FILENAME_WIN = "gost_3.0.0-nightly.20250101_windows_amd64.zip"
 _GOST_FILENAME_LINUX = "gost_3.0.0-nightly.20250101_linux_amd64.tar.gz"
+
+# Download sources (tried in order — GitHub may be blocked by DPI)
+_DOWNLOAD_URLS_WIN = [
+    "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20250101/" + _GOST_FILENAME_WIN,
+    "https://api.svaboda-shwe.online/static/bin/" + _GOST_FILENAME_WIN,  # our mirror
+]
+_DOWNLOAD_URLS_LINUX = [
+    "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20250101/" + _GOST_FILENAME_LINUX,
+    "https://api.svaboda-shwe.online/static/bin/" + _GOST_FILENAME_LINUX,
+]
 
 # Local port for the SOCKS5 endpoint
 DEFAULT_LOCAL_PORT = 1080
@@ -189,43 +198,67 @@ class GostTunnel:
         return self._download_gost()
 
     def _download_gost(self) -> Optional[Path]:
-        """Download gost binary from GitHub releases."""
+        """Download gost binary, trying multiple sources.
+
+        GitHub releases may be blocked by DPI — falls back to our mirror.
+        """
         try:
             self._bin_dir.mkdir(parents=True, exist_ok=True)
 
             if self._is_windows:
                 filename = _GOST_FILENAME_WIN
+                urls = _DOWNLOAD_URLS_WIN
             else:
                 filename = _GOST_FILENAME_LINUX
+                urls = _DOWNLOAD_URLS_LINUX
 
-            url = f"{_GOST_DOWNLOAD_BASE}/{filename}"
             tmp_dir = Path(tempfile.mkdtemp(prefix="svoboda_gost_"))
             archive_path = tmp_dir / filename
 
-            # Download with curl
-            dl_result = subprocess.run(
-                [
-                    "curl", "-sL",
-                    "--max-time", "120",
-                    "--connect-timeout", "15",
-                    "-o", str(archive_path),
-                    url,
-                ],
-                capture_output=True, timeout=130,
-            )
+            # Try each download source
+            downloaded = False
+            for i, url in enumerate(urls):
+                source = "GitHub" if "github.com" in url else "mirror"
+                logger.info("Downloading gost from %s (%d/%d)...", source, i + 1, len(urls))
 
-            if dl_result.returncode != 0 or not archive_path.exists():
-                logger.warning("Gost download failed (exit=%d)", dl_result.returncode)
+                dl_result = subprocess.run(
+                    [
+                        "curl", "-sL",
+                        "--max-time", "120",
+                        "--connect-timeout", "15",
+                        "-o", str(archive_path),
+                        "-w", "%{http_code}",
+                        url,
+                    ],
+                    capture_output=True, text=True, timeout=130,
+                )
+
+                http_code = dl_result.stdout.strip() if dl_result.stdout else "?"
+                if dl_result.returncode != 0:
+                    logger.warning("Gost download from %s failed: curl exit=%d, HTTP %s, stderr=%s",
+                                   source, dl_result.returncode, http_code,
+                                   (dl_result.stderr or "")[:200])
+                    continue
+
+                if not archive_path.exists():
+                    logger.warning("Gost download from %s: file not created", source)
+                    continue
+
+                size_mb = archive_path.stat().st_size / (1024 * 1024)
+                if size_mb < 1:
+                    logger.warning("Gost download from %s too small (%.1f MB, HTTP %s)",
+                                   source, size_mb, http_code)
+                    archive_path.unlink(missing_ok=True)
+                    continue
+
+                logger.info("Gost downloaded from %s (%.1f MB)", source, size_mb)
+                downloaded = True
+                break
+
+            if not downloaded:
+                logger.warning("All gost download sources failed")
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return None
-
-            size_mb = archive_path.stat().st_size / (1024 * 1024)
-            if size_mb < 1:
-                logger.warning("Gost download too small (%.1f MB), likely failed", size_mb)
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return None
-
-            logger.info("Gost downloaded (%.1f MB), extracting...", size_mb)
 
             # Extract
             ext = ".exe" if self._is_windows else ""
@@ -233,7 +266,6 @@ class GostTunnel:
 
             if filename.endswith(".zip"):
                 with zipfile.ZipFile(archive_path, "r") as zf:
-                    # Find gost binary in archive
                     for name in zf.namelist():
                         if name.endswith(f"gost{ext}"):
                             with zf.open(name) as src, open(gost_bin, "wb") as dst:
@@ -248,7 +280,6 @@ class GostTunnel:
                             tf.extract(member, self._bin_dir)
                             break
 
-            # Make executable on Linux
             if not self._is_windows and gost_bin.exists():
                 os.chmod(gost_bin, 0o755)
 
@@ -262,7 +293,7 @@ class GostTunnel:
             return None
 
         except subprocess.TimeoutExpired:
-            logger.warning("Gost download timed out")
+            logger.warning("Gost download timed out (all sources)")
             return None
         except Exception as exc:
             logger.warning("Gost download failed: %s", exc)

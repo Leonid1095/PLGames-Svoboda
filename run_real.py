@@ -220,7 +220,16 @@ def _start_permanent_zapret(
 
     Uses hostlist for targeted domain filtering + hostlist-auto for
     automatic detection of new blocked domains.
+
+    SAFETY: Always kills any existing winws2 before starting a new one.
+    Multiple WinDivert instances cause routing conflicts (partial internet).
     """
+    global _active_process
+    # Kill previous winws2 to prevent WinDivert conflicts
+    if _active_process is not None:
+        _stop_permanent_zapret(_active_process)
+        _active_process = None
+
     import os
     cmd = [str(binary)]
     is_win = platform.system() == "Windows"
