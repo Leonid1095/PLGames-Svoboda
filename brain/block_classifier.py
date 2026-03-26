@@ -254,9 +254,13 @@ class BlockageClassifier:
             ctx.verify_mode = ssl.CERT_NONE
 
             s = sock.create_connection((ip, 443), timeout=5)
-            # wrap_socket WITHOUT server_hostname → no SNI extension sent
-            ss = ctx.wrap_socket(s)
-            ss.close()
+            try:
+                # wrap_socket WITHOUT server_hostname → no SNI extension sent
+                ss = ctx.wrap_socket(s)
+                ss.close()
+            except Exception:
+                s.close()
+                raise
             logger.debug("TLS w/o SNI for %s (%s): OK → SNI_FILTERING", host, ip)
             return True
         except Exception as exc:

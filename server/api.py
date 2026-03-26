@@ -16,14 +16,13 @@ import hmac
 import json
 import os
 import sqlite3
-import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import requests as http_client
-from fastapi import FastAPI, Header, HTTPException, Query, Body
+from fastapi import FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 # ─── Config ────────────────────────────────────────────────────────────────────
@@ -40,6 +39,7 @@ DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 DEEPSEEK_MODEL = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
 DONATEPAY_API_KEY = os.environ.get("DONATEPAY_API_KEY", "")
 DONATEPAY_API_BASE = "https://donatepay.ru/api/v1"
+PRO_PROXY_URL = os.environ.get("PRO_PROXY_URL", "")
 
 # Registration secret for deriving per-install tokens
 REGISTRATION_SECRET = os.environ.get("REGISTRATION_SECRET", API_KEY)
@@ -345,20 +345,23 @@ async def ai_chat_proxy(
             raise HTTPException(status_code=503, detail="AI not configured on server")
 
         # Forward to AI
-        resp = http_client.post(
-            f"{api_url}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "messages": req.messages,
-                "temperature": req.temperature,
-                "max_tokens": req.max_tokens,
-            },
-            timeout=45,
-        )
+        try:
+            resp = http_client.post(
+                f"{api_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model,
+                    "messages": req.messages,
+                    "temperature": req.temperature,
+                    "max_tokens": req.max_tokens,
+                },
+                timeout=45,
+            )
+        except Exception as exc:
+            raise HTTPException(status_code=503, detail=f"AI service unavailable: {exc}")
 
         if resp.status_code != 200:
             raise HTTPException(
@@ -378,9 +381,13 @@ async def ai_chat_proxy(
         conn.commit()
 
         # Return AI response
-        data = resp.json()
+        try:
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, ValueError) as exc:
+            raise HTTPException(status_code=502, detail=f"Invalid AI response format: {exc}")
         return {
-            "content": data["choices"][0]["message"]["content"],
+            "content": content,
             "model": model,
             "tier": tier,
         }
@@ -580,7 +587,7 @@ async def report_host_strategy(
 
     conn = get_db()
     try:
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).isoformat()
         flags_str = json.dumps(flags, ensure_ascii=False)
         conn.execute(
             """INSERT INTO host_strategies (host, isp, flags, avg_fitness, report_count, last_reported)
@@ -672,12 +679,15 @@ async def check_license(
         except (ValueError, TypeError):
             return {"tier": "free", "until": None}
 
-        return {
+        result = {
             "tier": tier,
             "until": expires_at,
             "donor_name": donor_name,
             "amount": amount,
         }
+        if tier in ("pro", "owner") and PRO_PROXY_URL:
+            result["proxy_url"] = PRO_PROXY_URL
+        return result
     finally:
         conn.close()
 
@@ -823,7 +833,7 @@ async def vote_strategy(
                    VALUES (?, ?, ?, ?, ?, 1, ?, ?)
                    ON CONFLICT(flags, isp) DO UPDATE SET
                      report_count = report_count + 1,
-                     avg_fitness = (avg_fitness * report_count + 0.0) / (report_count + 1),
+                     avg_fitness = (avg_fitness * report_count + 0.2) / (report_count + 1),
                      last_reported = excluded.last_reported""",
                 (flags_json, 0.0, req.isp, req.dpi_type, req.region, 0.0, now),
             )

@@ -38,5 +38,6 @@
   "donatepay_page_url": "https://new.donatepay.ru/@lenya",
   "shadow_cycle_minutes": 10,
   "morphing_enabled": true,
-  "morphing_profile": "chrome_win"
+  "morphing_profile": "chrome_win",
+  "user_proxy": ""
 }

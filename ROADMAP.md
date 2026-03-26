@@ -29,7 +29,7 @@
 ## Фазы разработки
 
 ### Фаза 0: Фундамент [ТЕКУЩАЯ]
-**Статус: 80% готово**
+**Статус: 95% готово**
 
 - [x] Генетический алгоритм (Geneva-inspired)
 - [x] Mock fitness function для тестирования
@@ -41,13 +41,20 @@
 - [x] Shadow mode (run_shadow.py — непрерывный)
 - [x] Windows launcher (run.bat)
 - [x] Review script (review_data.py)
-- [ ] Deploy server API на VPS
+- [x] Deploy server API на VPS
+- [x] SOCKS5 прокси на VPS (microsocks :1080, user_proxy для клиентов)
 - [ ] Первый реальный тест в РФ
 
 ### Фаза 1: Реальное тестирование (1-2 недели)
 **Цель: GA работает на реальном трафике**
 
-- [ ] Развернуть API сервер на VPS (deploy_server.sh)
+- [x] Развернуть API сервер на VPS (deploy_server.sh)
+- [x] ProxyRouter — умная маршрутизация (zapret2 / WARP / user_proxy / byedpi)
+- [x] BlockClassifier — определение типа блокировки (SNI/IP/DNS/throttle)
+- [x] WARP интеграция (warp.py) — fallback для IP-блокировок
+- [x] Discovery модуль — автоопределение доступных инструментов
+- [x] Geneva-style стратегии (geneva.py)
+- [x] ECH (Encrypted Client Hello) поддержка (ech.py)
 - [ ] Скачать/собрать zapret2 бинарники (winws2.exe, nfqws2)
 - [ ] Тест shadow-mode с реальным zapret2 (через curl)
 - [ ] Тест на российском IP (VPN или реальный пользователь)

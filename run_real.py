@@ -1496,7 +1496,7 @@ def main():
 
                     # Donate reminder: terminal at 10 min, notification at 30 min
                     if _watchdog_checks == 2 and not _donate_shown:
-                        ui.donate_reminder(donate.page_url, tier.current_tier_name if hasattr(tier, 'current_tier_name') else "FREE")
+                        ui.donate_reminder(donate.page_url, tier.tier)
                         _donate_shown = True
                     if _watchdog_checks == 6 and not _donate_notified:
                         ui.donate_notification(donate.page_url)

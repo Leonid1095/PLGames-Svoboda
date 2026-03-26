@@ -338,21 +338,30 @@ class ECHManager:
     def _configure_win11_doh(self) -> bool:
         """Configure Windows 11 native DoH."""
         try:
-            # Get active network interface
-            result = subprocess.run(
-                ["netsh", "interface", "ipv4", "show", "config"],
-                capture_output=True, text=True, timeout=5,
-            )
+            # Detect active network interface name
+            iface_name = "Ethernet"
+            try:
+                result = subprocess.run(
+                    ["netsh", "interface", "ipv4", "show", "interfaces"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                for line in result.stdout.splitlines():
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[2] == "connected":
+                        iface_name = " ".join(parts[3:])
+                        break
+            except Exception:
+                pass
 
             # Set Cloudflare DNS with DoH
             # Windows 11 auto-uses DoH for known DoH-capable servers
             cmds = [
                 ["netsh", "interface", "ipv4", "set", "dnsservers",
-                 "name=Ethernet", "static", "1.1.1.1", "primary"],
+                 f"name={iface_name}", "static", "1.1.1.1", "primary"],
                 ["netsh", "interface", "ipv4", "add", "dnsservers",
-                 "name=Ethernet", "1.0.0.1", "index=2"],
+                 f"name={iface_name}", "1.0.0.1", "index=2"],
                 ["netsh", "interface", "ipv6", "set", "dnsservers",
-                 "name=Ethernet", "static", "2606:4700:4700::1111", "primary"],
+                 f"name={iface_name}", "static", "2606:4700:4700::1111", "primary"],
             ]
 
             for cmd in cmds:
