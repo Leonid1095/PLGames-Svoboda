@@ -325,53 +325,74 @@ def _start_permanent_zapret(
         except Exception as exc:
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
-    # Recommended fake TTL from TSPU profiler (used in all profiles)
-    quic_ttl = tspu_ttl if tspu_ttl and tspu_ttl > 0 else 4
+    # Recommended fake TTL from TSPU profiler
+    # IMPORTANT: DPI may be at hop 3, but CDN edge servers (ytimg, ggpht) are
+    # often at hop 5-8. Using TTL=2 kills fakes before DPI AND real packets
+    # get corrupted on CDN routes. Minimum TTL=3, default=4.
+    quic_ttl = max(tspu_ttl, 3) if tspu_ttl and tspu_ttl > 0 else 4
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 1: TLS (all HTTPS except YouTube CDN)
+    # Domains that need special handling (excluded from aggressive desync)
     # ══════════════════════════════════════════════════════════════
-    _yt_cdn_exclude = "googlevideo.com,googleapis.com,ggpht.com,ytimg.com"
+    _yt_cdn_domains = "googlevideo.com,googleapis.com,ggpht.com,ytimg.com,youtube.com,youtu.be"
+    _discord_domains = "discord.com,discordapp.com,discordapp.net,discord.gg,discord.media,discordcdn.com"
+    _gentle_exclude = f"{_yt_cdn_domains},{_discord_domains}"
     if _streamer_mode:
-        # Streamer: also exclude streaming/ingest CDNs from desync
-        _yt_cdn_exclude += (
+        _gentle_exclude += (
             ",live.twitch.tv,video-edge.abs.hls.ttvnw.net,usher.ttvnw.net"
             ",ingest.twitch.tv,video-weaver.twitch.tv"
             ",upload.youtube.com,obsproject.com"
             ",live-api-s.facebook.com,edgevideo.svc.7sn.net"
-            ",akamaihd.net,cloudfront.net"  # common CDN
+            ",akamaihd.net,cloudfront.net"
         )
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
+    # Aggressive desync from GA/enumerator. Excludes services that
+    # need gentle handling (long-lived WebSocket, CDN images).
+    # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--filter-tcp=443",
         "--filter-l7=tls",
-        f"--hostlist-exclude-domains={_yt_cdn_exclude}",
+        f"--hostlist-exclude-domains={_gentle_exclude}",
     ])
-    # Traffic morphing: browser-like TCP window
     morph_calls = morpher.get_permanent_calls()
     for mc in morph_calls:
         cmd.append(f"--lua-desync={mc}")
-    # NOTE: fake:ip_ttl NOT used here — it works for YouTube CDN (3 hops)
-    # but BREAKS Discord/X (5-7 hops). TTL=4 packets die before reaching server.
-    # Tested strategy (exactly what scored in enumeration/GA)
     morphed_flags = morpher.morph_strategy(flags)
     for call in morphed_flags:
         cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 2: TLS for YouTube CDN (googlevideo etc.)
-    # These need gentler desync — only fake, no aggressive split
+    # PROFILE 2: TLS for YouTube CDN (googlevideo, ytimg, etc.)
+    # Gentle: fake+split only, no aggressive reordering.
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
-        "--hostlist-domains=googlevideo.com,googleapis.com,ggpht.com,ytimg.com,youtube.com,youtu.be",
+        f"--hostlist-domains={_yt_cdn_domains}",
         f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
         "--lua-desync=multisplit:pos=midsld",
     ])
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 3: HTTP (port 80)
+    # PROFILE 3: TLS for Discord (gentle — WebSocket-safe)
+    # Discord uses persistent WebSocket (gateway.discord.gg).
+    # Aggressive split/reorder kills WS connections → app hangs.
+    # Only use simple split at SNI boundary — enough for DPI bypass,
+    # safe for long-lived connections.
+    # ══════════════════════════════════════════════════════════════
+    cmd.extend([
+        "--new",
+        "--filter-tcp=443",
+        "--filter-l7=tls",
+        f"--hostlist-domains={_discord_domains}",
+        "--lua-desync=multisplit:pos=midsld",
+    ])
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 4: HTTP (port 80)
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--new",
@@ -382,7 +403,7 @@ def _start_permanent_zapret(
         cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 4: Discord media (TCP ports 2053-8443)
+    # PROFILE 5: Discord media (TCP ports 2053-8443)
     # Streamer mode: skip — these ports add WinDivert overhead
     # ══════════════════════════════════════════════════════════════
     if not _streamer_mode:
@@ -390,12 +411,12 @@ def _start_permanent_zapret(
             "--new",
             "--filter-tcp=2053,2083,2087,2096,8443",
             "--filter-l7=tls",
+            # Gentle for Discord media — same as profile 3
+            "--lua-desync=multisplit:pos=midsld",
         ])
-        for call in flags:
-            cmd.append(f"--lua-desync={call}")
 
         # ══════════════════════════════════════════════════════════════
-        # PROFILE 5: Discord voice (UDP 50000-50100)
+        # PROFILE 6: Discord voice (UDP 50000-50100)
         # ══════════════════════════════════════════════════════════════
         cmd.extend([
             "--new",
