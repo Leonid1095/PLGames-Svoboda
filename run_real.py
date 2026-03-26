@@ -39,28 +39,45 @@ sys.path.insert(0, str(BASE_DIR))
 # ─── Safety: kill ALL winws2 on exit ─────────────────────────────────────────
 
 def _emergency_cleanup():
-    """Kill any remaining winws2/nfqws2 processes on exit and restore system proxy.
+    """Kill ALL child processes and restore network on exit.
 
-    This prevents WinDivert driver from staying loaded after crash,
-    which would break DNS and internet until reboot.
-    Also removes PAC proxy from registry so unblocked traffic stays direct.
+    Prevents: WinDivert driver staying loaded (breaks internet),
+    PAC proxy pointing to dead file (partial internet),
+    gost tunnel lingering (port conflict on next run).
     """
-    # Restore system proxy (remove PAC from registry)
     if platform.system() == "Windows":
-        try:
-            from brain.proxy_router import ProxyRouter
-            router = ProxyRouter({})
-            router.clear_system_proxy()
-        except Exception:
-            pass
+        # 1. Kill winws2 + gost
+        for proc_name in ("winws2.exe", "gost.exe"):
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", proc_name],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            except Exception:
+                pass
 
-    if platform.system() == "Windows":
+        # 2. Remove PAC proxy from registry (direct, no dependency on ProxyRouter)
         try:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "winws2.exe"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
+            import winreg
+            _REG = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, _REG, 0, winreg.KEY_ALL_ACCESS)
+            try:
+                pac_url, _ = winreg.QueryValueEx(key, "AutoConfigURL")
+                if pac_url and "proxy.pac" in pac_url:
+                    winreg.DeleteValue(key, "AutoConfigURL")
+            except FileNotFoundError:
+                pass
+            # Ensure manual proxy is off
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            winreg.CloseKey(key)
+            # Notify system
+            try:
+                import ctypes
+                ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)
+                ctypes.windll.wininet.InternetSetOptionW(0, 37, 0, 0)
+            except Exception:
+                pass
         except Exception:
             pass
     else:
