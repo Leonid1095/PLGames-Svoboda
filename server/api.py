@@ -11,15 +11,19 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import os
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("svoboda.api")
 
 import requests as http_client
 from fastapi import FastAPI, Header, HTTPException, Query
@@ -158,6 +162,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_host_strategies_unique
 
 CREATE INDEX IF NOT EXISTS idx_host_strategies_host ON host_strategies(host);
 CREATE INDEX IF NOT EXISTS idx_host_strategies_isp ON host_strategies(isp);
+
+CREATE TABLE IF NOT EXISTS pending_activations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    install_id TEXT NOT NULL,
+    donor_name TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    activated INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_pending_donor ON pending_activations(donor_name);
+CREATE INDEX IF NOT EXISTS idx_pending_active ON pending_activations(activated);
+
+CREATE TABLE IF NOT EXISTS processed_donations (
+    donation_id TEXT PRIMARY KEY,
+    donor_name TEXT NOT NULL,
+    amount REAL NOT NULL,
+    processed_at TEXT NOT NULL
+);
 """
 
 
@@ -194,6 +215,11 @@ class AIChatRequest(BaseModel):
     max_tokens: int = 1024
 
 
+class RegisterDonorRequest(BaseModel):
+    install_id: str
+    donor_name: str  # DonatePay nickname (before donating)
+
+
 # ─── DB helper ─────────────────────────────────────────────────────────────────
 
 def get_db() -> sqlite3.Connection:
@@ -211,10 +237,124 @@ def init_db() -> None:
 
 # ─── App ───────────────────────────────────────────────────────────────────────
 
+DONATE_POLL_INTERVAL = int(os.environ.get("DONATE_POLL_INTERVAL", "300"))  # 5 min
+
+
+async def _donation_poll_loop():
+    """Background task: poll DonatePay and auto-activate pending donors."""
+    await asyncio.sleep(30)  # initial delay after startup
+    while True:
+        try:
+            _process_pending_donations()
+        except Exception as exc:
+            logger.error("Donation poll error: %s", exc)
+        await asyncio.sleep(DONATE_POLL_INTERVAL)
+
+
+def _process_pending_donations():
+    """Check DonatePay for donations matching pending activations."""
+    if not DONATEPAY_API_KEY:
+        return
+
+    # Fetch recent donations from DonatePay
+    try:
+        resp = http_client.get(
+            f"{DONATEPAY_API_BASE}/transactions",
+            params={
+                "access_token": DONATEPAY_API_KEY,
+                "limit": 50,
+                "type": "donation",
+                "status": "success",
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            return
+        donations = resp.json().get("data", [])
+    except Exception:
+        return
+
+    if not donations:
+        return
+
+    conn = get_db()
+    try:
+        now = datetime.now(timezone.utc)
+        cutoff = (now - timedelta(days=LICENSE_DAYS + 5)).isoformat()
+
+        for d in donations:
+            donor_name = (d.get("what") or "").strip()
+            if not donor_name:
+                continue
+            amount = float(d.get("sum", 0))
+            if amount < TIER_SUPPORTER_MIN:
+                continue
+            created = d.get("created_at", "")
+            if created < cutoff:
+                continue
+
+            # Unique donation ID to avoid re-processing
+            donation_id = str(d.get("id", f"{donor_name}_{created}"))
+            already = conn.execute(
+                "SELECT 1 FROM processed_donations WHERE donation_id = ?",
+                (donation_id,),
+            ).fetchone()
+            if already:
+                continue
+
+            # Find pending activation for this donor name
+            pending = conn.execute(
+                "SELECT install_id FROM pending_activations WHERE donor_name = ? COLLATE NOCASE AND activated = 0 ORDER BY created_at DESC LIMIT 1",
+                (donor_name,),
+            ).fetchone()
+
+            if not pending:
+                # Also check existing licenses for renewal
+                existing = conn.execute(
+                    "SELECT install_id FROM licenses WHERE donor_name = ? COLLATE NOCASE",
+                    (donor_name,),
+                ).fetchone()
+                if existing:
+                    pending = existing
+
+            if not pending:
+                continue
+
+            install_id = pending[0]
+            tier = "pro" if amount >= TIER_PRO_MIN else "supporter"
+            expires = now + timedelta(days=LICENSE_DAYS)
+
+            conn.execute(
+                """INSERT INTO licenses (install_id, tier, donor_name, donation_amount, issued_at, expires_at)
+                   VALUES (?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(install_id) DO UPDATE SET
+                     tier = excluded.tier, donor_name = excluded.donor_name,
+                     donation_amount = excluded.donation_amount,
+                     issued_at = excluded.issued_at, expires_at = excluded.expires_at""",
+                (install_id, tier, donor_name, amount, now.isoformat(), expires.isoformat()),
+            )
+            conn.execute(
+                "UPDATE pending_activations SET activated = 1 WHERE donor_name = ? COLLATE NOCASE AND install_id = ?",
+                (donor_name, install_id),
+            )
+            conn.execute(
+                "INSERT OR IGNORE INTO processed_donations (donation_id, donor_name, amount, processed_at) VALUES (?, ?, ?, ?)",
+                (donation_id, donor_name, amount, now.isoformat()),
+            )
+            logger.info("Auto-activated %s tier for %s (install: %s, amount: %.0f RUB)",
+                        tier, donor_name, install_id[:8], amount)
+
+        conn.commit()
+    finally:
+        conn.close()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
+    poll_task = asyncio.create_task(_donation_poll_loop())
     yield
+    poll_task.cancel()
 
 app = FastAPI(
     title="Svoboda Analytics API",
@@ -605,6 +745,31 @@ async def report_host_strategy(
 
 
 # ─── License / Tier ────────────────────────────────────────────────────────────
+
+@app.post("/api/v1/license/register-donor")
+async def register_donor(req: RegisterDonorRequest, x_api_key: Optional[str] = Header(None)):
+    """Register donor name before donating — enables auto-activation via polling."""
+    _verify_api_key(x_api_key)
+    conn = get_db()
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        # Upsert: if same install_id+donor_name exists and not yet activated, update timestamp
+        existing = conn.execute(
+            "SELECT id FROM pending_activations WHERE install_id = ? AND donor_name = ? COLLATE NOCASE AND activated = 0",
+            (req.install_id, req.donor_name),
+        ).fetchone()
+        if existing:
+            conn.execute("UPDATE pending_activations SET created_at = ? WHERE id = ?", (now, existing[0]))
+        else:
+            conn.execute(
+                "INSERT INTO pending_activations (install_id, donor_name, created_at) VALUES (?, ?, ?)",
+                (req.install_id, req.donor_name, now),
+            )
+        conn.commit()
+        return {"ok": True, "message": f"Registered '{req.donor_name}' — donate and tier activates automatically within 5 min."}
+    finally:
+        conn.close()
+
 
 @app.post("/api/v1/license/activate")
 async def activate_license(req: ActivateLicenseRequest):

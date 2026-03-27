@@ -26,17 +26,17 @@ from typing import Optional
 logger = logging.getLogger("svoboda.gost")
 
 # gost release — single binary, no installer
-_GOST_VERSION = "3.0.0-nightly.20250101"
-_GOST_FILENAME_WIN = "gost_3.0.0-nightly.20250101_windows_amd64.zip"
-_GOST_FILENAME_LINUX = "gost_3.0.0-nightly.20250101_linux_amd64.tar.gz"
+_GOST_VERSION = "3.2.6"
+_GOST_FILENAME_WIN = f"gost_{_GOST_VERSION}_windows_amd64.zip"
+_GOST_FILENAME_LINUX = f"gost_{_GOST_VERSION}_linux_amd64.tar.gz"
 
 # Download sources (tried in order — GitHub may be blocked by DPI)
 _DOWNLOAD_URLS_WIN = [
-    "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20250101/" + _GOST_FILENAME_WIN,
+    f"https://github.com/go-gost/gost/releases/download/v{_GOST_VERSION}/{_GOST_FILENAME_WIN}",
     "https://api.svaboda-shwe.online/static/bin/" + _GOST_FILENAME_WIN,  # our mirror
 ]
 _DOWNLOAD_URLS_LINUX = [
-    "https://github.com/go-gost/gost/releases/download/v3.0.0-nightly.20250101/" + _GOST_FILENAME_LINUX,
+    f"https://github.com/go-gost/gost/releases/download/v{_GOST_VERSION}/{_GOST_FILENAME_LINUX}",
     "https://api.svaboda-shwe.online/static/bin/" + _GOST_FILENAME_LINUX,
 ]
 

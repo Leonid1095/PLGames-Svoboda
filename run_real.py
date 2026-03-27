@@ -741,10 +741,10 @@ def main():
         # ipinfo.io likely blocked by DPI — use cached profile
         logger.debug("ISP detection error (DPI may block ipinfo.io): %s", exc)
         try:
-            cached = profiler._load_cached_profile()
-            if cached:
-                isp_name = cached.get("isp_name", "unknown")
-                asn = cached.get("asn", "?")
+            profiler._load_profile()
+            if profiler.profile:
+                isp_name = profiler.profile.isp_name or "unknown"
+                asn = profiler.profile.asn or "?"
                 ui.ok(f"ISP: {isp_name} ({asn}) (cached)")
             else:
                 ui.warn("ISP unknown (will detect after bypass)")
