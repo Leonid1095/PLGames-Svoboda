@@ -311,7 +311,7 @@ def _start_permanent_zapret(
                 cmd.append("--hostlist-auto-fail-threshold=20")
                 cmd.append("--hostlist-auto-fail-time=120")
             else:
-                cmd.append("--hostlist-auto-fail-threshold=3")
+                cmd.append("--hostlist-auto-fail-threshold=8")
                 cmd.append("--hostlist-auto-fail-time=60")
             # Exclude Russian services (don't break yandex, vk, mail, etc.)
             exclude_src = Path(config.get("_base_dir", ".")) / "list-exclude.txt" if config else None
@@ -428,8 +428,8 @@ def _start_permanent_zapret(
             "--new",
             "--filter-tcp=2053,2083,2087,2096,8443",
             "--filter-l7=tls",
-            # Gentle for Discord media — same as profile 3
-            "--lua-desync=multisplit:pos=midsld",
+            # Same strategy as Profile 3 — host solver confirmed this works
+            "--lua-desync=multisplit:pos=1:seqovl=4096",
         ])
 
         # ══════════════════════════════════════════════════════════════
