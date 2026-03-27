@@ -334,7 +334,9 @@ def _start_permanent_zapret(
     # ══════════════════════════════════════════════════════════════
     # Domains that need special handling (excluded from aggressive desync)
     # ══════════════════════════════════════════════════════════════
-    _yt_cdn_domains = "googlevideo.com,googleapis.com,ggpht.com,ytimg.com,youtube.com,youtu.be"
+    _yt_video_domains = "googlevideo.com,youtube.com,youtu.be"  # video streaming — needs fake
+    _yt_image_domains = "ytimg.com,ggpht.com,googleapis.com"    # thumbnails/images — split only (fake corrupts CDN)
+    _yt_cdn_domains = f"{_yt_video_domains},{_yt_image_domains}"
     _discord_domains = "discord.com,discordapp.com,discordapp.net,discord.gg,discord.media,discordcdn.com"
     _gentle_exclude = f"{_yt_cdn_domains},{_discord_domains}"
     if _streamer_mode:
@@ -364,31 +366,46 @@ def _start_permanent_zapret(
         cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 2: TLS for YouTube CDN (googlevideo, ytimg, etc.)
-    # Gentle: fake+split only, no aggressive reordering.
+    # PROFILE 2a: TLS for YouTube video (googlevideo, youtube.com)
+    # Needs fake packets — DPI does TLS_INTERFERENCE (corrupts handshake).
+    # Fake with TTL=DPI distance confuses TSPU before it can inject RST.
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
-        f"--hostlist-domains={_yt_cdn_domains}",
+        f"--hostlist-domains={_yt_video_domains}",
         f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
-        "--lua-desync=multisplit:pos=midsld",
+        "--lua-desync=multisplit:pos=1:seqovl=4096",
     ])
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 3: TLS for Discord (gentle — WebSocket-safe)
-    # Discord uses persistent WebSocket (gateway.discord.gg).
-    # Aggressive split/reorder kills WS connections → app hangs.
-    # Only use simple split at SNI boundary — enough for DPI bypass,
-    # safe for long-lived connections.
+    # PROFILE 2b: TLS for YouTube images (ytimg, ggpht, googleapis)
+    # NO fake — these CDN edge servers are 5-8 hops away, fake packets
+    # with TTL=3 reach them and corrupt connections → thumbnails broken.
+    # Split with large overlap is enough for SNI bypass on image CDN.
+    # ══════════════════════════════════════════════════════════════
+    cmd.extend([
+        "--new",
+        "--filter-tcp=443",
+        "--filter-l7=tls",
+        f"--hostlist-domains={_yt_image_domains}",
+        "--lua-desync=multisplit:pos=1:seqovl=4096",
+    ])
+
+    # ══════════════════════════════════════════════════════════════
+    # PROFILE 3: TLS for Discord (split with large overlap)
+    # Host solver confirmed: multisplit:pos=1:seqovl=4096 works
+    # for discord.com and cdn.discordapp.com (fitness=1.000).
+    # No fake needed — pure split bypasses SNI filtering.
+    # No aggressive reorder — that kills WebSocket connections.
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_discord_domains}",
-        "--lua-desync=multisplit:pos=midsld",
+        "--lua-desync=multisplit:pos=1:seqovl=4096",
     ])
 
     # ══════════════════════════════════════════════════════════════

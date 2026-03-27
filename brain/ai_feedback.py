@@ -171,19 +171,15 @@ Return ONLY a JSON object:
     # ─── Internal learning ───────────────────────────────────────────
 
     def _update_exclusions(self) -> None:
-        """Auto-exclude function classes that consistently fail."""
+        """Auto-exclude function classes that consistently fail.
+
+        NOTE: fake/fakedsplit are NOT excluded because shadow tests don't use
+        per-domain profiles. Fake works for YouTube via Profile 2 in permanent
+        mode, but shadow tester can't test this → false negative exclusion.
+        Only syndata is safe to auto-exclude (it's never in per-domain profiles).
+        """
         if len(self.history) < 5:
             return
-
-        # Count fake successes vs failures
-        fake_tests = [r for r in self.history
-                      if any("fake" in s or "fakedsplit" in s for s in r.strategy)]
-        if len(fake_tests) >= 3:
-            fake_success = sum(1 for r in fake_tests if r.fitness > 0.3)
-            if fake_success == 0:
-                self._excluded_functions.add("fake")
-                self._excluded_functions.add("fakedsplit")
-                logger.info("AI feedback: excluded 'fake' — 0/%d successes", len(fake_tests))
 
         # Count syndata
         syndata_tests = [r for r in self.history
