@@ -879,6 +879,7 @@ def main():
     # ─── Smart routing: separate SNI-blocked from IP-blocked ─────────
     from brain.proxy_router import ProxyRouter
     router = ProxyRouter(config)
+    atexit.register(router.shutdown)  # Ensure PAC proxy is cleaned on ANY exit
     routing_plan = router.plan_routing(blocked)
 
     # Also check known IP-blocked services (AI, LinkedIn, etc.)
@@ -1160,27 +1161,31 @@ def main():
                             _active_process = None
                             time.sleep(1)
 
-                            from brain.host_solver import HostSolver
-                            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                            any_solved = False
-                            for fh in failed_hosts:
-                                if not _running:
-                                    break
-                                print(f"\n  Solving: {fh}...")
-                                result = solver.solve(fh, isp=isp_name)
-                                if result:
-                                    print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
-                                    any_solved = True
-                                else:
-                                    print(f"  [!] No strategy found for {fh}")
-
-                            # Restart permanent with main + per-host strategies
-                            extra = solver.build_extra_profiles(lua_dir) if any_solved else []
-                            _active_process = _start_permanent_zapret(
-                                zapret_bin, lua_dir, community["flags"],
-                                hostlist, _tspu_recommended_ttl, config,
-                                extra_profiles=extra,
-                            )
+                            extra = []
+                            try:
+                                from brain.host_solver import HostSolver
+                                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                                any_solved = False
+                                for fh in failed_hosts:
+                                    if not _running:
+                                        break
+                                    print(f"\n  Solving: {fh}...")
+                                    result = solver.solve(fh, isp=isp_name)
+                                    if result:
+                                        print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
+                                        any_solved = True
+                                    else:
+                                        print(f"  [!] No strategy found for {fh}")
+                                extra = solver.build_extra_profiles(lua_dir) if any_solved else []
+                            except Exception as solve_exc:
+                                logger.warning("Host solver failed: %s", solve_exc)
+                            finally:
+                                # ALWAYS restart zapret2 — even if solver crashed
+                                _active_process = _start_permanent_zapret(
+                                    zapret_bin, lua_dir, community["flags"],
+                                    hostlist, _tspu_recommended_ttl, config,
+                                    extra_profiles=extra,
+                                )
                             time.sleep(2)
 
                         # Launch ByeDPI SOCKS5 for remaining failed hosts
@@ -1262,45 +1267,63 @@ def main():
                                             _active_process = None
                                             time.sleep(1)
 
-                                            disc_results = _discovery.process_new_domains(real_new)
-                                            for dr in disc_results:
-                                                if dr.solved:
-                                                    print(f"  [{now}] SOLVED: {dr.domain} → fitness={dr.fitness:.3f}"
-                                                          f"{' (shared)' if dr.reported_to_server else ''}")
-                                                elif dr.route == "proxy":
-                                                    print(f"  [{now}] {dr.domain} → IP-blocked (proxy needed)")
-                                                else:
-                                                    print(f"  [{now}] {dr.domain} → {dr.block_type} (unsolved)")
-
-                                            # Restart zapret2 with extra per-host profiles
-                                            extra = _discovery.get_extra_profiles()
-                                            _active_process = _start_permanent_zapret(
-                                                zapret_bin, lua_dir, _current_flags, hostlist,
-                                                _tspu_recommended_ttl, config, extra_profiles=extra,
-                                            )
+                                            try:
+                                                disc_results = _discovery.process_new_domains(real_new)
+                                                for dr in disc_results:
+                                                    if dr.solved:
+                                                        print(f"  [{now}] SOLVED: {dr.domain} → fitness={dr.fitness:.3f}"
+                                                              f"{' (shared)' if dr.reported_to_server else ''}")
+                                                    elif dr.route == "proxy":
+                                                        print(f"  [{now}] {dr.domain} → IP-blocked (proxy needed)")
+                                                    else:
+                                                        print(f"  [{now}] {dr.domain} → {dr.block_type} (unsolved)")
+                                            except Exception as disc_exc:
+                                                logger.warning("Discovery failed: %s", disc_exc)
+                                            finally:
+                                                # ALWAYS restart zapret2 — even if discovery crashed
+                                                extra = _discovery.get_extra_profiles() if _discovery else []
+                                                _active_process = _start_permanent_zapret(
+                                                    zapret_bin, lua_dir, _current_flags, hostlist,
+                                                    _tspu_recommended_ttl, config, extra_profiles=extra,
+                                                )
                                         _known_auto_hosts = current_auto
                                 except Exception as exc:
                                     logger.debug("Discovery pipeline error: %s", exc)
+                                    # If _active_process died, restart it
+                                    if _active_process is None:
+                                        _active_process = _start_permanent_zapret(
+                                            zapret_bin, lua_dir, _current_flags, hostlist,
+                                            _tspu_recommended_ttl, config,
+                                        )
 
                             if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
                                 ui.warn("Health degraded, searching better strategy...")
                                 _stop_permanent_zapret(_active_process)
                                 _active_process = None
-                                # Re-enumerate and apply
-                                from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
-                                excluded = ai_feedback.get_excluded_functions()
-                                enum = StrategyEnumerator(excluded_functions=excluded)
-                                new_result = enum.enumerate(tester, threshold=0.65,
-                                    on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
-                                if new_result:
-                                    community["flags"] = new_result["flags"]
+                                try:
+                                    # Re-enumerate and apply
+                                    from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
+                                    excluded = ai_feedback.get_excluded_functions()
+                                    enum = StrategyEnumerator(excluded_functions=excluded)
+                                    new_result = enum.enumerate(tester, threshold=0.65,
+                                        on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
+                                    if new_result:
+                                        community["flags"] = new_result["flags"]
+                                        _current_flags = list(new_result["flags"])
+                                        _active_process = _start_permanent_zapret(
+                                            zapret_bin, lua_dir, new_result["flags"],
+                                            hostlist, _tspu_recommended_ttl, config)
+                                        if _active_process:
+                                            print(f"  [OK] New strategy: {' | '.join(new_result['flags'])} (fitness={new_result['fitness']:.3f})")
+                                            continue  # back to watchdog loop
+                                except Exception as renum_exc:
+                                    logger.warning("Re-enumeration failed: %s", renum_exc)
+                                # If re-enum failed, restart with old strategy before breaking
+                                if _active_process is None:
                                     _active_process = _start_permanent_zapret(
-                                        zapret_bin, lua_dir, new_result["flags"],
-                                        hostlist, _tspu_recommended_ttl, config)
-                                    if _active_process:
-                                        print(f"  [OK] New strategy: {' | '.join(new_result['flags'])} (fitness={new_result['fitness']:.3f})")
-                                        continue  # back to watchdog loop
-                                # If re-enum failed, break to outer flow
+                                        zapret_bin, lua_dir, _current_flags, hostlist,
+                                        _tspu_recommended_ttl, config,
+                                    )
                                 break
                         if _running and _active_process:
                             _stop_permanent_zapret(_active_process)
@@ -2117,4 +2140,7 @@ if __name__ == "__main__":
         print(f"\n  [FATAL ERROR] {exc}")
         import traceback
         traceback.print_exc()
-        input("\n  Press Enter to exit...")
+    finally:
+        # Ensure cleanup even on unhandled exception
+        _emergency_cleanup()
+    input("\n  Press Enter to exit...")
