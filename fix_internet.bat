@@ -57,14 +57,19 @@ echo  [4/6] Flushing DNS cache...
 ipconfig /flushdns >nul 2>&1
 echo        Done
 
-:: 5. Reset Winsock
-echo  [5/6] Resetting network stack...
+:: 5. Remove DNS fix from hosts file
+echo  [5/7] Removing DNS fix entries from hosts file...
+powershell -NoProfile -Command "$h='%SystemRoot%\System32\drivers\etc\hosts'; $c=Get-Content $h; $skip=$false; $out=@(); foreach($l in $c){if($l -match 'PLGames Svoboda DNS fix - START'){$skip=$true;continue}if($l -match 'PLGames Svoboda DNS fix - END'){$skip=$false;continue}if(-not $skip){$out+=$l}}; $out | Set-Content $h" >nul 2>&1
+echo        Done
+
+:: 6. Reset Winsock
+echo  [6/7] Resetting network stack...
 netsh winsock reset >nul 2>&1
 netsh int ip reset >nul 2>&1
 echo        Done
 
-:: 6. Notify system of proxy change
-echo  [6/6] Refreshing network settings...
+:: 7. Notify system of proxy change
+echo  [7/7] Refreshing network settings...
 powershell -Command "[System.Runtime.InteropServices.RuntimeEnvironment]" >nul 2>&1
 rundll32 wininet.dll,InternetSetOptionW >nul 2>&1
 echo        Done

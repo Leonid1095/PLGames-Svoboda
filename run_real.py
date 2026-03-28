@@ -90,6 +90,13 @@ def _emergency_cleanup():
         except Exception:
             pass
 
+    # 3. Remove DNS fix entries from hosts file
+    try:
+        from brain.dns_fixer import remove_hosts_entries
+        remove_hosts_entries()
+    except Exception:
+        pass
+
 atexit.register(_emergency_cleanup)
 
 # Windows: catch console close (X button), Ctrl+C, logoff, shutdown
@@ -767,35 +774,26 @@ def main():
         except Exception:
             ui.warn("ISP unknown (will detect after bypass)")
 
-    # ─── Smart DNS diagnosis: detect SNI proxy / DNS poisoning ──────
-    # If user's DNS redirects blocked domains to an SNI proxy (one IP for
-    # many domains), winws2 desync on that IP breaks TLS to the proxy.
-    # Auto-detect and exclude that IP from desync processing.
-    _sni_proxy_ip = None
-    try:
-        import socket
-        _dns_test_domains = ["youtube.com", "discord.com", "x.com"]
-        _dns_results: dict[str, str] = {}
-        for _td in _dns_test_domains:
-            try:
-                _dns_results[_td] = socket.gethostbyname(_td)
-            except Exception:
-                pass
-        if len(_dns_results) >= 2:
-            # Group domains by resolved IP
-            _by_ip: dict[str, list[str]] = {}
-            for _d, _ip in _dns_results.items():
-                _by_ip.setdefault(_ip, []).append(_d)
-            for _ip, _doms in _by_ip.items():
-                if len(_doms) >= 2:
-                    # 2+ unrelated blocked domains → same IP = SNI proxy
-                    _sni_proxy_ip = _ip
-                    print(f"\n  [DNS] SNI proxy detected: {_ip}")
-                    print(f"        Handles: {', '.join(_doms)}")
-                    print(f"        winws2 will skip traffic to this IP")
-                    break
-    except Exception:
-        pass
+    # ─── Smart DNS diagnosis ─────────────────────────────────────────
+    from brain.dns_fixer import detect_sni_proxy, diagnose_and_fix_dns, remove_hosts_entries
+    atexit.register(remove_hosts_entries)  # Clean hosts file on ANY exit
+
+    _sni_proxy_ip = detect_sni_proxy(["youtube.com", "discord.com", "x.com"])
+    if _sni_proxy_ip:
+        print(f"\n  [DNS] SNI proxy detected: {_sni_proxy_ip}")
+        print(f"        winws2 will skip traffic to this IP")
+        # Resolve real IPs via DoH and fix hosts file
+        from brain.ech import DoHResolver
+        _doh = DoHResolver()
+        if _doh.find_working_provider():
+            _dns_fix = diagnose_and_fix_dns(hosts, _doh, sni_proxy_ip=_sni_proxy_ip)
+            _fixed = [h for h, r in _dns_fix.items() if r.get("fixed")]
+            _via_proxy = [h for h, r in _dns_fix.items() if r.get("status") == "ok"]
+            if _fixed:
+                print(f"  [DNS] Fixed via DoH: {', '.join(_fixed)}")
+                print(f"        Real IPs written to hosts file → winws2 desync will work")
+            if _via_proxy:
+                print(f"  [DNS] Direct (no fix needed): {', '.join(_via_proxy)}")
     config["_sni_proxy_ip"] = _sni_proxy_ip
 
     # ─── Download blocklist ─────────────────────────────────────────
