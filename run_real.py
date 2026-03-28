@@ -338,7 +338,9 @@ def _start_permanent_zapret(
     _yt_image_domains = "ytimg.com,ggpht.com,googleapis.com"    # thumbnails/images — split only (fake corrupts CDN)
     _yt_cdn_domains = f"{_yt_video_domains},{_yt_image_domains}"
     _discord_domains = "discord.com,discordapp.com,discordapp.net,discord.gg,discord.media,discordcdn.com"
-    _gentle_exclude = f"{_yt_cdn_domains},{_discord_domains}"
+    # Critical services that must NEVER be desync'd (breaks Claude Code, Steam, etc.)
+    _never_desync = "anthropic.com,claude.ai,openai.com,cursor.sh,github.com,githubusercontent.com,steam.com,steampowered.com,steamstatic.com,microsoft.com,visualstudio.com"
+    _gentle_exclude = f"{_yt_cdn_domains},{_discord_domains},{_never_desync}"
     if _streamer_mode:
         _gentle_exclude += (
             ",live.twitch.tv,video-edge.abs.hls.ttvnw.net,usher.ttvnw.net"
@@ -347,6 +349,9 @@ def _start_permanent_zapret(
             ",live-api-s.facebook.com,edgevideo.svc.7sn.net"
             ",akamaihd.net,cloudfront.net"
         )
+
+    # SNI proxy IP exclusion — don't desync traffic to user's SNI proxy
+    _sni_ip = config.get("_sni_proxy_ip") if config else None
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
@@ -358,6 +363,8 @@ def _start_permanent_zapret(
         "--filter-l7=tls",
         f"--hostlist-exclude-domains={_gentle_exclude}",
     ])
+    if _sni_ip:
+        cmd.append(f"--ipset-exclude-ip={_sni_ip}")
     morph_calls = morpher.get_permanent_calls()
     for mc in morph_calls:
         cmd.append(f"--lua-desync={mc}")
@@ -370,14 +377,17 @@ def _start_permanent_zapret(
     # Needs fake packets — DPI does TLS_INTERFERENCE (corrupts handshake).
     # Fake with TTL=DPI distance confuses TSPU before it can inject RST.
     # ══════════════════════════════════════════════════════════════
-    cmd.extend([
+    _yt_video_profile = [
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_yt_video_domains}",
         f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
         "--lua-desync=multisplit:pos=1:seqovl=4096",
-    ])
+    ]
+    if _sni_ip:
+        _yt_video_profile.append(f"--ipset-exclude-ip={_sni_ip}")
+    cmd.extend(_yt_video_profile)
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2b: TLS for YouTube images (ytimg, ggpht, googleapis)
@@ -385,13 +395,16 @@ def _start_permanent_zapret(
     # with TTL=3 reach them and corrupt connections → thumbnails broken.
     # Split with large overlap is enough for SNI bypass on image CDN.
     # ══════════════════════════════════════════════════════════════
-    cmd.extend([
+    _yt_image_profile = [
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_yt_image_domains}",
         "--lua-desync=multisplit:pos=1:seqovl=4096",
-    ])
+    ]
+    if _sni_ip:
+        _yt_image_profile.append(f"--ipset-exclude-ip={_sni_ip}")
+    cmd.extend(_yt_image_profile)
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 3: TLS for Discord (split with large overlap)
@@ -400,13 +413,16 @@ def _start_permanent_zapret(
     # No fake needed — pure split bypasses SNI filtering.
     # No aggressive reorder — that kills WebSocket connections.
     # ══════════════════════════════════════════════════════════════
-    cmd.extend([
+    _discord_profile = [
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_discord_domains}",
         "--lua-desync=multisplit:pos=1:seqovl=4096",
-    ])
+    ]
+    if _sni_ip:
+        _discord_profile.append(f"--ipset-exclude-ip={_sni_ip}")
+    cmd.extend(_discord_profile)
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 4: HTTP (port 80)
@@ -750,6 +766,37 @@ def main():
                 ui.warn("ISP unknown (will detect after bypass)")
         except Exception:
             ui.warn("ISP unknown (will detect after bypass)")
+
+    # ─── Smart DNS diagnosis: detect SNI proxy / DNS poisoning ──────
+    # If user's DNS redirects blocked domains to an SNI proxy (one IP for
+    # many domains), winws2 desync on that IP breaks TLS to the proxy.
+    # Auto-detect and exclude that IP from desync processing.
+    _sni_proxy_ip = None
+    try:
+        import socket
+        _dns_test_domains = ["youtube.com", "discord.com", "x.com"]
+        _dns_results: dict[str, str] = {}
+        for _td in _dns_test_domains:
+            try:
+                _dns_results[_td] = socket.gethostbyname(_td)
+            except Exception:
+                pass
+        if len(_dns_results) >= 2:
+            # Group domains by resolved IP
+            _by_ip: dict[str, list[str]] = {}
+            for _d, _ip in _dns_results.items():
+                _by_ip.setdefault(_ip, []).append(_d)
+            for _ip, _doms in _by_ip.items():
+                if len(_doms) >= 2:
+                    # 2+ unrelated blocked domains → same IP = SNI proxy
+                    _sni_proxy_ip = _ip
+                    print(f"\n  [DNS] SNI proxy detected: {_ip}")
+                    print(f"        Handles: {', '.join(_doms)}")
+                    print(f"        winws2 will skip traffic to this IP")
+                    break
+    except Exception:
+        pass
+    config["_sni_proxy_ip"] = _sni_proxy_ip
 
     # ─── Download blocklist ─────────────────────────────────────────
     print()
