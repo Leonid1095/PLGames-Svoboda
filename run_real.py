@@ -380,9 +380,28 @@ def _start_permanent_zapret(
     _sni_ip = None  # intentionally disabled
 
     # ══════════════════════════════════════════════════════════════
+    # ADAPTIVE PROFILES: use the FOUND strategy everywhere.
+    #
+    # Old approach: hardcode different strategies per profile.
+    # Problem: enumerator finds working strategy, but only Profile 1
+    # uses it. YouTube/Discord profiles had their own (broken) strategies.
+    #
+    # New approach: the found strategy (`flags`) IS the bypass.
+    # All profiles use it. For CDN-sensitive profiles (images), we
+    # strip fake/fakedsplit (corrupts close CDN) but keep everything else.
+    # ══════════════════════════════════════════════════════════════
+
+    # Build CDN-safe version of strategy: remove fake packets that
+    # corrupt connections to close CDN servers (5-8 hops).
+    _cdn_unsafe_funcs = ("fake:", "fakedsplit:")
+    _safe_flags = [f for f in flags if not any(f.startswith(u) for u in _cdn_unsafe_funcs)]
+    if not _safe_flags:
+        # If strategy was ONLY fake-based, fall back to proven safe default
+        _safe_flags = ["multidisorder:pos=1,midsld:seqovl=681"]
+
+    # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
-    # Aggressive desync from GA/enumerator. Excludes services that
-    # need gentle handling (long-lived WebSocket, CDN images).
+    # Uses full found strategy including fake if present.
     # ══════════════════════════════════════════════════════════════
     cmd.extend([
         "--filter-tcp=443",
@@ -400,51 +419,44 @@ def _start_permanent_zapret(
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2a: TLS for YouTube video (googlevideo, youtube.com)
-    # multidisorder + seqovl=681 (SNI field offset) — proven anti-throttle
-    # on er-telecom 2026-03-29 (dronatar_youtube, fitness=0.655).
-    # NOTE: fake:tcp_md5 does NOT work on er-telecom (fitness=0.000,
-    # TSPU detects fake packets). Use multidisorder instead.
-    # seqovl=681 targets exact SNI field offset in TLS ClientHello,
-    # confusing TSPU's SNI parser without fake packets.
+    # Uses FOUND strategy — same as general. If AI/enumerator found
+    # it works for youtube.com, it works for googlevideo.com too.
     # ══════════════════════════════════════════════════════════════
-    _yt_video_profile = [
+    cmd.extend([
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_yt_video_domains}",
-        "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
-    ]
-    cmd.extend(_yt_video_profile)
+    ])
+    for call in flags:
+        cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 2b: TLS for YouTube images (ytimg, ggpht, googleapis)
-    # Same anti-throttle strategy as video — multidisorder with SNI
-    # field offset. NO fake (CDN 5-8 hops, fake corrupts connections).
+    # PROFILE 2b: TLS for YouTube images (ytimg, ggpht)
+    # CDN-safe: no fake (CDN edge at 5-8 hops, fake corrupts them).
+    # Uses found strategy with fake stripped out.
     # ══════════════════════════════════════════════════════════════
-    _yt_image_profile = [
+    cmd.extend([
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_yt_image_domains}",
-        "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
-    ]
-    cmd.extend(_yt_image_profile)
+    ])
+    for call in _safe_flags:
+        cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 3: TLS for Discord
-    # multidisorder + seqovl=681 — same anti-throttle as YouTube.
-    # Previous multisplit:seqovl=4096 caused 8s throttling (TSPU
-    # still reads SNI from reassembled stream). multidisorder with
-    # SNI offset confuses TSPU's parser more effectively.
+    # Uses FOUND strategy — same as general.
     # ══════════════════════════════════════════════════════════════
-    _discord_profile = [
+    cmd.extend([
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_discord_domains}",
-        "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
-    ]
-    cmd.extend(_discord_profile)
+    ])
+    for call in flags:
+        cmd.append(f"--lua-desync={call}")
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 4: HTTP (port 80)
@@ -466,9 +478,9 @@ def _start_permanent_zapret(
             "--new",
             "--filter-tcp=2053,2083,2087,2096,8443",
             "--filter-l7=tls",
-            # Same anti-throttle as Profile 3
-            "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
         ])
+        for call in flags:
+            cmd.append(f"--lua-desync={call}")
 
         # ══════════════════════════════════════════════════════════════
         # PROFILE 6: Discord voice (UDP 50000-50100)
