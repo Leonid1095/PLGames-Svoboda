@@ -1025,6 +1025,8 @@ def main():
             logger.info("Test hosts updated: removed %s (IP-blocked/proxied), keeping %s",
                         _untestable, _new_hosts)
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
+    # Refresh hosts after IP-blocked filtering (watchdog uses this)
+    hosts = config.get("test_hosts", hosts)
 
     # ─── Unified watchdog with auto-recovery ─────────────────────────
     # All code paths (AI Engine, community, cached, enum, GA) converge here
@@ -1203,6 +1205,12 @@ def main():
                     )
                     if _active_process:
                         ui.ok("Restarted with per-host profiles")
+                    else:
+                        # Fallback: restart without per-host profiles
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags, hostlist,
+                            _tspu_recommended_ttl, config,
+                        )
                 if sync.is_configured:
                     sync.sync_now()
                 ui.separator()
@@ -1847,9 +1855,10 @@ def main():
     if working == 0:
         print()
         print("  [!] Strategy applied but sites still blocked.")
-        print("  Trying next evolution cycle...")
-        _stop_permanent_zapret(_active_process)
-        _active_process = None
+        print("  Watchdog will attempt recovery immediately...")
+        # Keep zapret2 running with current strategy as baseline —
+        # watchdog will detect failure and run full recovery cycle.
+        # Do NOT stop zapret2 here, or user has no bypass for 5 min.
     else:
         print()
         print(f"  === DPI BYPASS ACTIVE ({working}/{total} sites) ===")
