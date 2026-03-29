@@ -388,48 +388,49 @@ def _start_permanent_zapret(
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2a: TLS for YouTube video (googlevideo, youtube.com)
-    # Fake + split combo: fake confuses TSPU before it reads SNI,
-    # split fragments ClientHello. Works with SNI proxy (proxy reads
-    # reassembled ClientHello). Proven working on er-telecom 2026-03-26.
+    # multidisorder + seqovl=681 (SNI field offset) — proven anti-throttle
+    # on er-telecom 2026-03-29 (dronatar_youtube, fitness=0.655).
+    # NOTE: fake:tcp_md5 does NOT work on er-telecom (fitness=0.000,
+    # TSPU detects fake packets). Use multidisorder instead.
+    # seqovl=681 targets exact SNI field offset in TLS ClientHello,
+    # confusing TSPU's SNI parser without fake packets.
     # ══════════════════════════════════════════════════════════════
     _yt_video_profile = [
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_yt_video_domains}",
-        f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
-        "--lua-desync=multisplit:pos=1:seqovl=4096",
+        "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
     ]
     cmd.extend(_yt_video_profile)
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2b: TLS for YouTube images (ytimg, ggpht, googleapis)
-    # NO fake — these CDN edge servers are 5-8 hops away, fake packets
-    # with TTL=3 reach them and corrupt connections → thumbnails broken.
-    # Split with large overlap is enough for SNI bypass on image CDN.
+    # Same anti-throttle strategy as video — multidisorder with SNI
+    # field offset. NO fake (CDN 5-8 hops, fake corrupts connections).
     # ══════════════════════════════════════════════════════════════
     _yt_image_profile = [
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_yt_image_domains}",
-        "--lua-desync=multisplit:pos=1:seqovl=4096",
+        "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
     ]
     cmd.extend(_yt_image_profile)
 
     # ══════════════════════════════════════════════════════════════
-    # PROFILE 3: TLS for Discord (split with large overlap)
-    # Host solver confirmed: multisplit:pos=1:seqovl=4096 works
-    # for discord.com and cdn.discordapp.com (fitness=1.000).
-    # No fake needed — pure split bypasses SNI filtering.
-    # No aggressive reorder — that kills WebSocket connections.
+    # PROFILE 3: TLS for Discord
+    # multidisorder + seqovl=681 — same anti-throttle as YouTube.
+    # Previous multisplit:seqovl=4096 caused 8s throttling (TSPU
+    # still reads SNI from reassembled stream). multidisorder with
+    # SNI offset confuses TSPU's parser more effectively.
     # ══════════════════════════════════════════════════════════════
     _discord_profile = [
         "--new",
         "--filter-tcp=443",
         "--filter-l7=tls",
         f"--hostlist-domains={_discord_domains}",
-        "--lua-desync=multisplit:pos=1:seqovl=4096",
+        "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
     ]
     cmd.extend(_discord_profile)
 
@@ -453,8 +454,8 @@ def _start_permanent_zapret(
             "--new",
             "--filter-tcp=2053,2083,2087,2096,8443",
             "--filter-l7=tls",
-            # Same strategy as Profile 3 — host solver confirmed this works
-            "--lua-desync=multisplit:pos=1:seqovl=4096",
+            # Same anti-throttle as Profile 3
+            "--lua-desync=multidisorder:pos=1,midsld:seqovl=681",
         ])
 
         # ══════════════════════════════════════════════════════════════

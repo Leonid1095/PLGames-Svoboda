@@ -321,10 +321,12 @@ class ConnectionTester:
           and get rejected in favor of clean fast strategies.
         """
         # 1. Base success rate
-        # throttled = 0.25 weight (reduced from 0.5 — throttling is near-failure)
+        # throttled = 0.10 weight — TSPU throttling (3-8s latency) makes services
+        # unusable (Discord won't connect, YouTube won't play video).
+        # Near-zero weight ensures throttled strategies get rejected.
         throttled_count = sum(1 for r in results if r.success and r.error_type == "throttled")
         clean_success = successful - throttled_count
-        success_rate = (clean_success + throttled_count * 0.25) / total
+        success_rate = (clean_success + throttled_count * 0.10) / total
 
         # 2. Latency bonus: only for clean (non-throttled) successful requests
         # Throttled latencies (3-8s) would collapse the bonus unfairly for mixed results.
@@ -350,11 +352,9 @@ class ConnectionTester:
         else:
             penalty_score = 0.0
 
-        # 4. All-throttled penalty: if every success is throttled, add extra penalty.
-        # This pushes fully-throttled strategies clearly below 0.5 threshold.
-        # Reduced from 0.15: TSPU always throttles bypass traffic, so this
-        # penalty was making ALL working strategies score below acceptance thresholds.
-        all_throttled_penalty = 0.08 if (successful > 0 and clean_success == 0) else 0.0
+        # 4. All-throttled penalty: if every success is throttled, add heavy penalty.
+        # TSPU throttling = service unusable. Strategy must be rejected.
+        all_throttled_penalty = 0.20 if (successful > 0 and clean_success == 0) else 0.0
 
         fitness = (
             0.55 * success_rate
