@@ -62,14 +62,19 @@ echo  [5/7] Removing DNS fix entries from hosts file...
 powershell -NoProfile -Command "$h='%SystemRoot%\System32\drivers\etc\hosts'; $c=Get-Content $h; $skip=$false; $out=@(); foreach($l in $c){if($l -match 'PLGames Svoboda DNS fix - START'){$skip=$true;continue}if($l -match 'PLGames Svoboda DNS fix - END'){$skip=$false;continue}if(-not $skip){$out+=$l}}; $out | Set-Content $h" >nul 2>&1
 echo        Done
 
-:: 6. Reset Winsock
-echo  [6/7] Resetting network stack...
+:: 6. Restore DNS to DHCP (in case Svoboda switched it to 1.1.1.1)
+echo  [6/8] Restoring DNS to automatic...
+netsh interface ip set dns name="Ethernet" dhcp >nul 2>&1
+echo        Done
+
+:: 7. Reset Winsock
+echo  [7/8] Resetting network stack...
 netsh winsock reset >nul 2>&1
 netsh int ip reset >nul 2>&1
 echo        Done
 
-:: 7. Notify system of proxy change
-echo  [7/7] Refreshing network settings...
+:: 8. Notify system of proxy change
+echo  [8/8] Refreshing network settings...
 powershell -Command "[System.Runtime.InteropServices.RuntimeEnvironment]" >nul 2>&1
 rundll32 wininet.dll,InternetSetOptionW >nul 2>&1
 echo        Done

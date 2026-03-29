@@ -24,11 +24,73 @@ logger = logging.getLogger("svoboda.enumerator")
 # Sorted by: anti-throttle first (Tier 0) → autottl → fixed TTL → basic split → minimalist
 
 KNOWN_STRATEGIES: list[dict] = [
-    # ── Tier 0: Anti-throttle FIRST (ER-Telecom/Dom.ru + Flowseal proven) ─
-    # TSPU stateful DPI throttles connections when it recognizes bypass pattern.
-    # seqovl=4096 overwhelms DPI state buffer. seqovl=681 = SNI field offset.
-    # wssize=1 breaks HTTP/2 mux so TSPU cannot track stream state.
-    # These MUST be tested BEFORE seqovl=8 strategies (which get throttled).
+    # ══════════════════════════════════════════════════════════════════
+    # COMMUNITY PROVEN (Flowseal ALT11, Dronatar v4.6 — Feb 2026)
+    # These are the exact strategies used by 15000+ users via Flowseal
+    # zapret-discord-youtube. Converted from zapret v1 dpi-desync to
+    # zapret2 lua-desync format. Tested FIRST as highest confidence.
+    # ══════════════════════════════════════════════════════════════════
+
+    # Flowseal ALT11: Google/YouTube profile (Feb 2026, most popular)
+    # Original: --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681
+    #           --dpi-desync-split-pos=1 --dpi-desync-fooling=ts --repeats=8
+    {
+        "name": "flowseal_alt11_google",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ts_up:repeats=8",
+            "multisplit:pos=1:seqovl=681:seqovl_pattern=fake_default_tls",
+        ],
+        "desc": "Flowseal ALT11: Google/YouTube (15K+ users, Feb 2026)",
+    },
+    # Flowseal ALT11: General profile with seqovl=664
+    {
+        "name": "flowseal_alt11_general",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ts_up:repeats=8",
+            "multisplit:pos=1:seqovl=664",
+        ],
+        "desc": "Flowseal ALT11: General TLS (seqovl=664, Feb 2026)",
+    },
+    # Dronatar v4.6: YouTube TLS profile (Feb 2026)
+    # Original: --dpi-desync=multidisorder --split-pos=1,midsld --split-seqovl=681
+    {
+        "name": "dronatar_youtube",
+        "flags": [
+            "multidisorder:pos=1,midsld:seqovl=681",
+        ],
+        "desc": "Dronatar v4.6: YouTube TLS (multidisorder, Feb 2026)",
+    },
+    # Dronatar v4.6: YouTube HTTP (port 80)
+    # Original: --dpi-desync=fake --fooling=badseq
+    {
+        "name": "dronatar_http",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_seq=-10000",
+        ],
+        "desc": "Dronatar v4.6: HTTP with badseq fooling (Feb 2026)",
+    },
+    # Flowseal ALT: simpler fake+fakedsplit with ts fooling
+    # Original: --dpi-desync=fake,fakedsplit --fooling=ts --fakedsplit-pattern=0x00
+    {
+        "name": "flowseal_alt_fakedsplit",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ts_up:repeats=6",
+            "fakedsplit:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ts_up",
+        ],
+        "desc": "Flowseal ALT: fake+fakedsplit with ts fooling",
+    },
+    # Community: syndata (game servers, Feb 2026)
+    {
+        "name": "flowseal_syndata",
+        "flags": [
+            "syndata",
+        ],
+        "desc": "Flowseal ALT11: syndata for game/generic TCP (Feb 2026)",
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # ER-Telecom/Dom.ru proven (our own testing)
+    # ══════════════════════════════════════════════════════════════════
     {
         "name": "ertel_multisplit_4096",
         "flags": [
@@ -337,6 +399,15 @@ KNOWN_STRATEGIES: list[dict] = [
 
     # ── Tier 7: wssize variants with fake (when seqovl alone fails) ──────
     {
+        "name": "wssize1_fake_ttl3_split",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "fake:blob=fake_default_tls:ip_ttl=3:ip6_ttl=3:tcp_md5:repeats=6",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Tiny window + fake TTL=3 (exact DPI hop) + 4KB overlap",
+    },
+    {
         "name": "wssize1_fake_ttl4_disorder",
         "flags": [
             "wssize:wsize=1:scale=0",
@@ -344,6 +415,50 @@ KNOWN_STRATEGIES: list[dict] = [
             "multidisorder:pos=1,midsld",
         ],
         "desc": "Tiny window + fake TTL=4 + disorder (max anti-H2-kill)",
+    },
+    {
+        "name": "wssize1_fake_ttl2_split",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "fake:blob=fake_default_tls:ip_ttl=2:ip6_ttl=2:tcp_md5:repeats=8",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Tiny window + fake TTL=2 (below DPI) + 4KB overlap",
+    },
+    {
+        "name": "wssize1_oob_split",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "oob:pos=1",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Tiny window + TCP OOB byte + 4KB overlap (confuses DPI parser)",
+    },
+    {
+        "name": "wssize1_fake_badsum_split",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:badsum:repeats=6",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Tiny window + fake with bad checksum + 4KB overlap",
+    },
+    {
+        "name": "wssize1_fake_autottl_split",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "fake:blob=fake_default_tls:ip_autottl=-1,3-20:ip6_autottl=-1,3-20:tcp_md5:repeats=6",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "Tiny window + fake auto-TTL + 4KB overlap",
+    },
+    {
+        "name": "ipfrag_fake_split",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_md5:repeats=6:ipfrag",
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "IP-fragmented fake + 4KB overlap (TSPU may not reassemble IP frags)",
     },
     {
         "name": "wssize8_disorder",

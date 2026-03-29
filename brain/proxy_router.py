@@ -455,14 +455,17 @@ function FindProxyForURL(url, host) {{
     # ─── Internal ─────────────────────────────────────────────────────
 
     def _start_gost_tunnel(self, plgames_proxy: str, test_host: str) -> Optional[str]:
-        """Start gost TLS tunnel and return local proxy URL if working.
+        """Start TLS tunnel and return local proxy URL if working.
+
+        Uses pure-Python SOCKS5-over-TLS tunnel (gost sends custom SOCKS5
+        methods that microsocks doesn't understand).
 
         Returns socks5://127.0.0.1:PORT or None if failed.
         """
         try:
-            from brain.gost_tunnel import GostTunnel
+            from brain.tls_tunnel import TLSTunnel
 
-            self._gost_tunnel = GostTunnel(self.config, proxy_url=plgames_proxy, local_port=1082)
+            self._gost_tunnel = TLSTunnel.from_proxy_url(plgames_proxy, local_port=1082)
             if not self._gost_tunnel.start():
                 self._gost_tunnel = None
                 return None
@@ -472,12 +475,12 @@ function FindProxyForURL(url, host) {{
             if self._test_proxy(local_url, test_host):
                 return local_url
 
-            logger.warning("Gost tunnel started but cannot reach %s", test_host)
+            logger.warning("TLS tunnel started but cannot reach %s", test_host)
             self._gost_tunnel.stop()
             self._gost_tunnel = None
             return None
         except Exception as exc:
-            logger.warning("Gost tunnel setup failed: %s", exc)
+            logger.warning("TLS tunnel setup failed: %s", exc)
             if self._gost_tunnel:
                 self._gost_tunnel.stop()
                 self._gost_tunnel = None
@@ -504,6 +507,7 @@ function FindProxyForURL(url, host) {{
             result = subprocess.run(
                 [
                     "curl", "-s", "--max-time", "10",
+                    "--ssl-no-revoke",
                     "--proxy", proxy_url,
                     f"https://{test_host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",

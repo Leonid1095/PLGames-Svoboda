@@ -173,59 +173,124 @@ Return ONLY a JSON object:
     def _update_exclusions(self) -> None:
         """Auto-exclude function classes that consistently fail.
 
-        NOTE: fake/fakedsplit are NOT excluded because shadow tests don't use
-        per-domain profiles. Fake works for YouTube via Profile 2 in permanent
-        mode, but shadow tester can't test this → false negative exclusion.
-        Only syndata is safe to auto-exclude (it's never in per-domain profiles).
+        Analyzes test history and excludes functions that NEVER work,
+        saving time for the enumerator and GA.
         """
         if len(self.history) < 5:
             return
 
-        # Count syndata
-        syndata_tests = [r for r in self.history
-                         if any("syndata" in s for s in r.strategy)]
-        if len(syndata_tests) >= 3:
-            syn_success = sum(1 for r in syndata_tests if r.fitness > 0.3)
-            if syn_success == 0:
-                self._excluded_functions.add("syndata")
+        # Auto-exclude function classes that scored 0 in 3+ tests
+        for func_name in ("syndata", "fake", "fakedsplit", "tcpseg", "hostfakesplit"):
+            tests = [r for r in self.history if any(func_name in s for s in r.strategy)]
+            if len(tests) >= 3:
+                successes = sum(1 for r in tests if r.fitness > 0.1)
+                if successes == 0:
+                    self._excluded_functions.add(func_name)
+                    logger.info("Auto-excluded '%s': 0/%d tests succeeded", func_name, len(tests))
 
     def _generate_observations(self) -> list[str]:
-        """Generate human-readable observations from test history."""
+        """Generate deep observations from test history.
+
+        Performs the kind of analysis a human expert would:
+        1. Per-domain failure patterns (is a domain ALWAYS failing?)
+        2. Strategy class effectiveness (fake=0, multisplit=good, etc.)
+        3. Parameter impact analysis (seqovl, wssize, etc.)
+        4. Root cause diagnosis (SNI proxy, TSPU specifics)
+        """
         observations = []
 
         if not self.history:
             return ["No test data collected yet."]
 
-        # Best strategy
+        # ── Best strategy ──────────────────────────────────────────
         best = max(self.history, key=lambda r: r.fitness)
         if best.fitness > 0:
             observations.append(
                 f"Best strategy: {' | '.join(best.strategy)} (fitness={best.fitness:.3f})"
             )
 
-        # Fake analysis
-        fake_tests = [r for r in self.history
-                      if any("fake" in s for s in r.strategy)]
-        if fake_tests:
-            avg_fake = sum(r.fitness for r in fake_tests) / len(fake_tests)
-            if avg_fake < 0.1:
+        # ── Per-domain failure analysis ────────────────────────────
+        # Like a human would: "youtube.com ALWAYS fails → not a strategy issue"
+        domain_stats: dict[str, dict] = {}  # domain → {total, success, errors}
+        for rec in self.history:
+            if not rec.host_results:
+                continue
+            for host, result in rec.host_results.items():
+                if host not in domain_stats:
+                    domain_stats[host] = {"total": 0, "success": 0, "errors": {}}
+                domain_stats[host]["total"] += 1
+                if isinstance(result, dict):
+                    ok = result.get("success", False)
+                    err = result.get("error_type", "unknown")
+                elif isinstance(result, bool):
+                    ok = result
+                    err = "unknown"
+                else:
+                    ok = bool(result)
+                    err = "unknown"
+                if ok:
+                    domain_stats[host]["success"] += 1
+                else:
+                    domain_stats[host]["errors"][err] = domain_stats[host]["errors"].get(err, 0) + 1
+
+        for host, stats in domain_stats.items():
+            total = stats["total"]
+            if total < 3:
+                continue
+            success_rate = stats["success"] / total
+            if success_rate == 0:
+                top_err = max(stats["errors"], key=stats["errors"].get) if stats["errors"] else "unknown"
                 observations.append(
-                    f"IMPORTANT: All {len(fake_tests)} fake strategies scored avg={avg_fake:.3f} — "
-                    f"fake does NOT work on this ISP. DPI likely ignores TTL-based fakes."
+                    f"CRITICAL: {host} failed ALL {total} tests (error={top_err}). "
+                    f"This is NOT a strategy problem — the domain may need a proxy, "
+                    f"or winws2 is interfering with SNI proxy traffic."
+                )
+            elif success_rate < 0.2:
+                observations.append(
+                    f"WARNING: {host} only passed {stats['success']}/{total} tests. "
+                    f"Consider per-host solver or proxy routing."
+                )
+            elif success_rate > 0.8:
+                observations.append(
+                    f"{host} works reliably ({stats['success']}/{total} passed)."
                 )
 
-        # Split analysis
-        split_tests = [r for r in self.history
-                       if any("multisplit" in s for s in r.strategy)]
-        if split_tests:
-            avg_split = sum(r.fitness for r in split_tests) / len(split_tests)
-            if avg_split > 0.5:
+        # ── Strategy class analysis ────────────────────────────────
+        # "ALL fake = 0 → TSPU detects fake packets on this ISP"
+        class_stats: dict[str, list[float]] = {}
+        for func_name in ("fake", "multisplit", "multidisorder", "wssize", "fakedsplit"):
+            tests = [r for r in self.history if any(func_name in s for s in r.strategy)]
+            if tests:
+                fitnesses = [r.fitness for r in tests]
+                class_stats[func_name] = fitnesses
+
+        for func_name, fitnesses in class_stats.items():
+            avg = sum(fitnesses) / len(fitnesses)
+            count = len(fitnesses)
+            if avg < 0.05 and count >= 3:
                 observations.append(
-                    f"multisplit strategies work well (avg={avg_split:.3f}) — "
-                    f"DPI is vulnerable to ClientHello splitting."
+                    f"IMPORTANT: ALL {count} '{func_name}' strategies scored avg={avg:.3f}. "
+                    f"{func_name} does NOT work on this ISP — auto-excluded from search."
+                )
+            elif avg > 0.3 and count >= 2:
+                observations.append(
+                    f"'{func_name}' strategies work (avg={avg:.3f}, {count} tests). "
+                    f"Focus evolution on {func_name}-based strategies."
                 )
 
-        # seqovl impact
+        # ── Fitness ceiling detection ──────────────────────────────
+        # "Best is 0.43 after 53 strategies → one domain always fails"
+        top_results = sorted(self.history, key=lambda r: r.fitness, reverse=True)[:10]
+        if len(top_results) >= 5:
+            ceiling = sum(r.fitness for r in top_results[:5]) / 5
+            if 0.35 < ceiling < 0.50:
+                observations.append(
+                    f"FITNESS CEILING at ~{ceiling:.2f} — suggests 1-2 domains always fail "
+                    f"regardless of strategy. These domains likely need proxy routing, "
+                    f"not DPI bypass. Check per-domain stats above."
+                )
+
+        # ── seqovl impact ──────────────────────────────────────────
         with_seqovl = [r for r in self.history if any("seqovl" in s for s in r.strategy)]
         without_seqovl = [r for r in self.history
                           if any("multisplit" in s for s in r.strategy)
@@ -233,16 +298,32 @@ Return ONLY a JSON object:
         if with_seqovl and without_seqovl:
             avg_with = sum(r.fitness for r in with_seqovl) / len(with_seqovl)
             avg_without = sum(r.fitness for r in without_seqovl) / len(without_seqovl)
-            if avg_with > avg_without + 0.05:
+            diff = avg_with - avg_without
+            if abs(diff) > 0.03:
+                better = "improves" if diff > 0 else "hurts"
                 observations.append(
-                    f"seqovl improves fitness: +{avg_with - avg_without:.3f} "
+                    f"seqovl {better} fitness by {abs(diff):.3f} "
                     f"(with={avg_with:.3f} vs without={avg_without:.3f})"
                 )
 
-        # Excluded
+        # ── wssize impact ──────────────────────────────────────────
+        with_wssize = [r for r in self.history if any("wssize" in s for s in r.strategy)]
+        without_wssize = [r for r in self.history
+                          if not any("wssize" in s for s in r.strategy)
+                          and any("multisplit" in s or "multidisorder" in s for s in r.strategy)]
+        if with_wssize and without_wssize:
+            avg_ws = sum(r.fitness for r in with_wssize) / len(with_wssize)
+            avg_no_ws = sum(r.fitness for r in without_wssize) / len(without_wssize)
+            if abs(avg_ws - avg_no_ws) > 0.03:
+                better = "helps" if avg_ws > avg_no_ws else "hurts"
+                observations.append(
+                    f"wssize {better}: {avg_ws:.3f} vs {avg_no_ws:.3f}"
+                )
+
+        # ── Excluded ───────────────────────────────────────────────
         if self._excluded_functions:
             observations.append(
-                f"Excluded from gene pool: {', '.join(self._excluded_functions)}"
+                f"Auto-excluded (never work): {', '.join(sorted(self._excluded_functions))}"
             )
 
         return observations

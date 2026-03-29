@@ -120,6 +120,7 @@ class ConnectionTester:
         self._throttle_ms: int = config.get("throttle_threshold_ms", 5000)
         self._base_dir = Path(config.get("_base_dir", "."))
         self._is_windows = platform.system() == "Windows"
+        self._sni_proxy_ip: Optional[str] = config.get("_sni_proxy_ip")
         self._zapret_bin = self._resolve_zapret_binary()
         self._zapret_dir = self._zapret_bin.parent if self._zapret_bin else None
         self._lua_dir = self._resolve_lua_dir()
@@ -463,6 +464,9 @@ class ConnectionTester:
             "--filter-l7=tls,http",
         ])
 
+        # NOTE: Do NOT exclude SNI proxy IP. winws2 desync + SNI proxy is
+        # the working combo: winws2 hides SNI from TSPU, proxy reads full SNI.
+
         # Add strategy lua-desync calls
         for call in flags:
             cmd.append(f"--lua-desync={call}")
@@ -540,6 +544,7 @@ class ConnectionTester:
             result = subprocess.run(
                 [
                     "curl", "-s",
+                    "--ssl-no-revoke",
                     "--max-time", str(t),
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
@@ -630,6 +635,7 @@ class ConnectionTester:
             result = subprocess.run(
                 [
                     "curl", "-s",
+                    "--ssl-no-revoke",
                     "--max-time", str(timeout),
                     "-r", "0-65535",
                     f"https://{host}",
@@ -659,6 +665,7 @@ class ConnectionTester:
             result = subprocess.run(
                 [
                     "curl", "-s",
+                    "--ssl-no-revoke",
                     "--max-time", str(timeout),
                     f"https://{host}",
                     "-H", "Upgrade: websocket",

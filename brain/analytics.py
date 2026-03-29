@@ -144,14 +144,17 @@ class Analytics:
         error_type: str = "",
     ) -> None:
         """Record a single connection test result."""
-        self._conn.execute(
-            """INSERT INTO test_results
-               (strategy_id, host, http_code, success, latency_ms, error_type, tested_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (strategy_id, host, http_code, int(success), latency_ms, error_type,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        self._conn.commit()
+        try:
+            self._conn.execute(
+                """INSERT INTO test_results
+                   (strategy_id, host, http_code, success, latency_ms, error_type, tested_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (strategy_id, host, http_code, int(success), latency_ms, error_type,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
+        except Exception as exc:
+            logger.debug("Failed to log test result: %s", exc)
 
     # ─── Evolution events ──────────────────────────────────────────────────
 

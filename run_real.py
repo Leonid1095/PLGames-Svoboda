@@ -287,8 +287,10 @@ def _start_permanent_zapret(
             cmd.append(f"--lua-init=@{os.path.relpath(str(lib), base)}")
         if antidpi.exists():
             cmd.append(f"--lua-init=@{os.path.relpath(str(antidpi), base)}")
-        if auto.exists():
-            cmd.append(f"--lua-init=@{os.path.relpath(str(auto), base)}")
+        # NOTE: zapret-auto.lua disabled — it may interfere with multi-profile
+        # mode. Shadow tester works without it, permanent doesn't.
+        # if auto.exists():
+        #     cmd.append(f"--lua-init=@{os.path.relpath(str(auto), base)}")
 
     # Traffic morphing: apply browser TLS profile
     from brain.morpher import TrafficMorpher
@@ -296,9 +298,12 @@ def _start_permanent_zapret(
         profile_name=config.get("morphing_profile", "chrome_win") if config else "chrome_win",
         enabled=config.get("morphing_enabled", True) if config else True,
     )
-    tls_init = morpher.get_tls_init()
-    if tls_init:
-        cmd.append(f"--lua-init={tls_init}")
+    # NOTE: tls_init disabled — the lua-init with spaces in argument
+    # ("fake_default_tls = tls_mod(...)") may break subsequent profiles.
+    # Morphing is applied per-call via morph_strategy() instead.
+    # tls_init = morpher.get_tls_init()
+    # if tls_init:
+    #     cmd.append(f"--lua-init={tls_init}")
 
     # Hostlist: copy to binary dir to avoid path issues
     if hostlist and hostlist.exists():
@@ -341,7 +346,7 @@ def _start_permanent_zapret(
     # ══════════════════════════════════════════════════════════════
     # Domains that need special handling (excluded from aggressive desync)
     # ══════════════════════════════════════════════════════════════
-    _yt_video_domains = "googlevideo.com,youtube.com,youtu.be"  # video streaming — needs fake
+    _yt_video_domains = "googlevideo.com,youtube.com,youtu.be"  # video streaming — desync needed for SNI proxy
     _yt_image_domains = "ytimg.com,ggpht.com,googleapis.com"    # thumbnails/images — split only (fake corrupts CDN)
     _yt_cdn_domains = f"{_yt_video_domains},{_yt_image_domains}"
     _discord_domains = "discord.com,discordapp.com,discordapp.net,discord.gg,discord.media,discordcdn.com"
@@ -357,8 +362,10 @@ def _start_permanent_zapret(
             ",akamaihd.net,cloudfront.net"
         )
 
-    # SNI proxy IP exclusion — don't desync traffic to user's SNI proxy
-    _sni_ip = config.get("_sni_proxy_ip") if config else None
+    # SNI proxy: winws2 desync MUST be applied to SNI proxy traffic.
+    # The combo works: winws2 hides SNI from TSPU, SNI proxy reads full SNI and routes.
+    # Do NOT use --ipset-exclude-ip — that breaks video/CDN through SNI proxy.
+    _sni_ip = None  # intentionally disabled
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
@@ -381,8 +388,9 @@ def _start_permanent_zapret(
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2a: TLS for YouTube video (googlevideo, youtube.com)
-    # Needs fake packets — DPI does TLS_INTERFERENCE (corrupts handshake).
-    # Fake with TTL=DPI distance confuses TSPU before it can inject RST.
+    # Fake + split combo: fake confuses TSPU before it reads SNI,
+    # split fragments ClientHello. Works with SNI proxy (proxy reads
+    # reassembled ClientHello). Proven working on er-telecom 2026-03-26.
     # ══════════════════════════════════════════════════════════════
     _yt_video_profile = [
         "--new",
@@ -392,8 +400,6 @@ def _start_permanent_zapret(
         f"--lua-desync=fake:blob=fake_default_tls:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:tcp_md5:repeats=6",
         "--lua-desync=multisplit:pos=1:seqovl=4096",
     ]
-    if _sni_ip:
-        _yt_video_profile.append(f"--ipset-exclude-ip={_sni_ip}")
     cmd.extend(_yt_video_profile)
 
     # ══════════════════════════════════════════════════════════════
@@ -409,8 +415,6 @@ def _start_permanent_zapret(
         f"--hostlist-domains={_yt_image_domains}",
         "--lua-desync=multisplit:pos=1:seqovl=4096",
     ]
-    if _sni_ip:
-        _yt_image_profile.append(f"--ipset-exclude-ip={_sni_ip}")
     cmd.extend(_yt_image_profile)
 
     # ══════════════════════════════════════════════════════════════
@@ -427,8 +431,6 @@ def _start_permanent_zapret(
         f"--hostlist-domains={_discord_domains}",
         "--lua-desync=multisplit:pos=1:seqovl=4096",
     ]
-    if _sni_ip:
-        _discord_profile.append(f"--ipset-exclude-ip={_sni_ip}")
     cmd.extend(_discord_profile)
 
     # ══════════════════════════════════════════════════════════════
@@ -624,7 +626,8 @@ def _curl_check_one(host: str, timeout: int = 5) -> dict:
     _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
     try:
         result = subprocess.run(
-            ["curl", "-s", "--max-time", str(timeout),
+            ["curl", "-s", "--ssl-no-revoke",
+             "--max-time", str(timeout),
              f"https://{host}",
              "-o", "NUL" if is_win else "/dev/null",
              "-w", "%{http_code}|%{time_total}"],
@@ -775,26 +778,16 @@ def main():
             ui.warn("ISP unknown (will detect after bypass)")
 
     # ─── Smart DNS diagnosis ─────────────────────────────────────────
-    from brain.dns_fixer import detect_sni_proxy, diagnose_and_fix_dns, remove_hosts_entries
+    from brain.dns_fixer import detect_sni_proxy, remove_hosts_entries
     atexit.register(remove_hosts_entries)  # Clean hosts file on ANY exit
 
     _sni_proxy_ip = detect_sni_proxy(["youtube.com", "discord.com", "x.com"])
     if _sni_proxy_ip:
         print(f"\n  [DNS] SNI proxy detected: {_sni_proxy_ip}")
-        print(f"        winws2 will skip traffic to this IP")
-        # Resolve real IPs via DoH and fix hosts file
-        from brain.ech import DoHResolver
-        _doh = DoHResolver()
-        if _doh.find_working_provider():
-            _dns_fix = diagnose_and_fix_dns(hosts, _doh, sni_proxy_ip=_sni_proxy_ip)
-            _fixed = [h for h, r in _dns_fix.items() if r.get("fixed")]
-            _via_proxy = [h for h, r in _dns_fix.items() if r.get("status") == "ok"]
-            if _fixed:
-                print(f"  [DNS] Fixed via DoH: {', '.join(_fixed)}")
-                print(f"        Real IPs written to hosts file → winws2 desync will work")
-            if _via_proxy:
-                print(f"  [DNS] Direct (no fix needed): {', '.join(_via_proxy)}")
-    config["_sni_proxy_ip"] = _sni_proxy_ip
+        print(f"        winws2 desync + SNI proxy = working combo")
+        print(f"        (winws2 hides SNI from TSPU, proxy routes traffic)")
+    # Do NOT set config["_sni_proxy_ip"] — ipset-exclude is disabled intentionally
+    config["_sni_proxy_ip"] = None
 
     # ─── Download blocklist ─────────────────────────────────────────
     print()
@@ -892,6 +885,18 @@ def main():
         logger.debug("ECH setup error: %s", exc)
 
     # ─── Smart block detection ──────────────────────────────────────
+    # Ensure basic desync is running during classification — without it,
+    # classifier sees TCP connect failures and misdiagnoses SNI filtering as IP_BLOCK.
+    if not _active_process:
+        _classify_proc = _start_permanent_zapret(
+            zapret_bin, lua_dir,
+            ["multisplit:pos=1:seqovl=4096"],  # basic desync for classification
+            hostlist, 4, config,
+        )
+        if _classify_proc:
+            _active_process = _classify_proc
+            time.sleep(2)
+
     from brain.block_classifier import BlockageClassifier
 
     hosts = config.get("test_hosts", ["youtube.com", "discord.com", "cdn.discordapp.com"])
@@ -1006,6 +1011,19 @@ def main():
                 classifier_strategies.append(s)
 
     # ─── Initialize tester ──────────────────────────────────────────
+    # Remove IP-blocked and proxy-routed domains from test_hosts.
+    # These can NEVER be unblocked by DPI bypass — testing them wastes
+    # time and drags fitness below threshold.
+    _ip_blocked_hosts = {h for h, r in blocked.items() if r.block_type == "IP_BLOCK"}
+    _proxy_hosts = set(routing_plan.proxy_hosts) if routing_plan else set()
+    _untestable = _ip_blocked_hosts | _proxy_hosts
+    if _untestable:
+        _old_hosts = config.get("test_hosts", [])
+        _new_hosts = [h for h in _old_hosts if h not in _untestable]
+        if _new_hosts:
+            config["test_hosts"] = _new_hosts
+            logger.info("Test hosts updated: removed %s (IP-blocked/proxied), keeping %s",
+                        _untestable, _new_hosts)
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
 
     # ─── AI Engine — reserved for per-host solving after community/enum ──
@@ -1032,7 +1050,9 @@ def main():
                     if not _running:
                         break
                     fit = tester.test_strategy(s["flags"])
-                    ai_feedback.record_test(s["flags"], fit, "ok" if fit > 0.3 else "timeout")
+                    # Record with per-host results for AI pattern analysis
+                    _hr = tester._last_report.host_results if tester._last_report else {}
+                    ai_feedback.record_test(s["flags"], fit, "ok" if fit > 0.3 else "timeout", host_results=_hr)
                     if fit > best_fit:
                         best_fit, best_flags, best_name = fit, s["flags"], s["name"]
                     if fit >= stop_on_fitness:
@@ -1524,6 +1544,9 @@ def main():
         )
 
         _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best_flags, hostlist, _tspu_recommended_ttl, config)
+        if not _active_process:
+            print("  [ERROR] winws2 failed to start with enumerated strategy, trying GA...")
+            enum_result = None  # fall through to GA
         if _active_process:
             time.sleep(2)
             verify = _quick_connectivity_check(hosts)
@@ -1624,6 +1647,7 @@ def main():
                 _active_process = None
                 enum_result = None  # fall through to GA
 
+    best = None  # will be set by GA if enumerator didn't apply
     if not enum_result:
         print(f"\n  Starting GA evolution (this may take a few minutes)...")
 

@@ -226,7 +226,8 @@ class BlockageClassifier:
         """Quick HTTPS check — used to verify if 'blocked' domain is actually reachable."""
         try:
             result = subprocess.run(
-                ["curl", "-s", "--max-time", "5", f"https://{host}",
+                ["curl", "-s", "--ssl-no-revoke", "--max-time", "5",
+                 f"https://{host}",
                  "-o", "NUL" if self._is_windows else "/dev/null",
                  "-w", "%{http_code}"],
                 capture_output=True, text=True, timeout=8,
@@ -358,7 +359,7 @@ class BlockageClassifier:
             fmt = "%{http_code}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}"
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", "--ssl-no-revoke",
                     "--max-time", str(self.timeout),
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
@@ -410,7 +411,7 @@ class BlockageClassifier:
             # Download 64KB — tests if connection stays alive after handshake
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", "--ssl-no-revoke",
                     "--max-time", str(self.timeout + 3),
                     "-r", "0-65535",
                     f"https://{host}",
