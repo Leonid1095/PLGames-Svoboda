@@ -1026,6 +1026,348 @@ def main():
                         _untestable, _new_hosts)
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
 
+    # ─── Unified watchdog with auto-recovery ─────────────────────────
+    # All code paths (AI Engine, community, cached, enum, GA) converge here
+    # after applying initial strategy.  Recovery cycle never exits — it
+    # retries community → AI → enum → GA → per-host until Ctrl+C.
+    def _unified_watchdog(current_flags, strategy_id):
+        """Monitor connection and auto-recover on degradation.
+
+        Runs until Ctrl+C.  On health drop:
+          1. Classify block type
+          2. AI failure analysis
+          2.5. Community strategy
+          3. AI-suggested fix
+          4. Fast enumeration
+          5. GA evolution
+          6. Per-host solver
+        Also monitors hostlist-auto for newly blocked domains (discovery).
+        """
+        global _active_process
+
+        _wd_interval = config.get("watchdog_interval_minutes", 5) * 60
+        _wd_fail_thr = config.get("watchdog_fail_threshold", 2)
+        _wd_min_fit = config.get("watchdog_min_fitness", 0.6)
+        _wd_ga_cfg = GAConfig.from_config(config)
+        _wd_ga_cfg.generations = min(_wd_ga_cfg.generations, 15)
+        _wd_ga_cfg.population_size = min(_wd_ga_cfg.population_size, 10)
+        _wd_flags = list(current_flags)
+        _wd_sid = strategy_id
+        _wd_extra = []
+
+        # Load saved per-host strategies on entry
+        try:
+            from brain.host_solver import HostSolver as _HSBoot
+            _hs_boot = _HSBoot(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+            _wd_extra = _hs_boot.build_extra_profiles(lua_dir)
+            if _wd_extra and _active_process:
+                ui.info(f"Loaded {len(_wd_extra) // 4} saved per-host strategies")
+                _stop_permanent_zapret(_active_process)
+                _active_process = _start_permanent_zapret(
+                    zapret_bin, lua_dir, _wd_flags, hostlist,
+                    _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
+                )
+        except Exception as _hs_exc:
+            logger.debug("Per-host load: %s", _hs_exc)
+
+        # Discovery pipeline
+        _discovery = None
+        try:
+            from brain.discovery import DiscoveryPipeline
+            from brain.host_solver import HostSolver as _HSDisc
+            _ds = _HSDisc(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+            _discovery = DiscoveryPipeline(
+                config, tester=tester, classifier=BlockageClassifier(timeout=5),
+                host_solver=_ds, proxy_router=router,
+                server_sync=sync, isp=isp_name,
+            )
+        except Exception:
+            pass
+
+        _known_auto = set()
+        _auto_path = Path(zapret_bin).parent / "hostlist-auto.txt" if zapret_bin else None
+        if _auto_path and _auto_path.exists():
+            try:
+                _known_auto = set(_auto_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines())
+            except Exception:
+                pass
+
+        while _running:
+            for _ in range(_wd_interval):
+                if not _running:
+                    break
+                time.sleep(1)
+            if not _running:
+                break
+
+            # ── Health check ──────────────────────────────────────────
+            now = datetime.now().strftime("%H:%M")
+            status_parts = []
+            for host in hosts:
+                r = _curl_check_one(host, timeout=10)
+                analytics.log_test_result(
+                    strategy_id=_wd_sid, host=host,
+                    http_code=r["http_code"], success=r["success"],
+                    latency_ms=r["latency_ms"], error_type=r["error_type"],
+                )
+                short = host.replace(".com", "").replace(".discordapp", "")
+                if r["success"]:
+                    status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
+                else:
+                    status_parts.append(f"{short}:{(r['error_type'] or 'FAIL').upper()}")
+
+            health = analytics.get_all_hosts_health(hosts, minutes=10)
+            overall = health["overall_rate"]
+            degraded = health.get("degraded", [])
+            print(f"  [{now}] {' | '.join(status_parts)}  (health={overall:.0%})")
+
+            # ── Discovery: new blocked domains ────────────────────────
+            if _auto_path and _auto_path.exists() and _discovery:
+                try:
+                    cur_auto = set(_auto_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines())
+                    new_doms = [d for d in (cur_auto - _known_auto) if d.strip() and not d.startswith("#")]
+                    if new_doms:
+                        print(f"  [{now}] New blocked domains: {', '.join(new_doms[:3])}")
+                        _stop_permanent_zapret(_active_process)
+                        _active_process = None
+                        time.sleep(1)
+                        try:
+                            for dr in _discovery.process_new_domains(new_doms):
+                                st = "SOLVED" if dr.solved else ("proxy" if dr.route == "proxy" else "unsolved")
+                                print(f"  [{now}] {dr.domain} -> {st}")
+                        except Exception as de:
+                            logger.warning("Discovery: %s", de)
+                        finally:
+                            d_extra = []
+                            try:
+                                d_extra = _discovery.get_extra_profiles()
+                            except Exception:
+                                pass
+                            _active_process = _start_permanent_zapret(
+                                zapret_bin, lua_dir, _wd_flags, hostlist,
+                                _tspu_recommended_ttl, config,
+                                extra_profiles=d_extra or _wd_extra,
+                            )
+                    _known_auto = cur_auto
+                except Exception as exc:
+                    logger.debug("Discovery check: %s", exc)
+                    if _active_process is None:
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags, hostlist,
+                            _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
+                        )
+
+            # ── Failure detection ─────────────────────────────────────
+            needs_recovery = False
+            if overall < _wd_min_fit:
+                needs_recovery = True
+                print(f"  [!] Health degraded: {overall:.0%} < {_wd_min_fit:.0%}")
+            for host in hosts:
+                hd = health["hosts"].get(host, {})
+                if hd.get("streak_fail", 0) >= _wd_fail_thr:
+                    needs_recovery = True
+                    print(f"  [!] {host}: {hd['streak_fail']} consecutive failures")
+
+            # ── Per-host solving (partial failures, overall OK) ───────
+            pfails = [
+                h for h in hosts
+                if health["hosts"].get(h, {}).get("streak_fail", 0) >= 3
+                and not needs_recovery
+            ]
+            if pfails:
+                from brain.host_solver import HostSolver
+                ui.separator()
+                ui.warn(f"Persistent failures: {', '.join(pfails)}")
+                ui.info("Searching per-host strategies...")
+                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                solved = False
+                for fh in pfails[:2]:
+                    if solver.get(fh):
+                        ui.info(f"{fh}: already solved")
+                        continue
+                    ui.step(f"Solving: {fh}")
+                    sr = solver.solve(fh, isp=isp_name)
+                    if sr:
+                        ui.ok(f"{fh}: fitness={sr.fitness:.3f}")
+                        solved = True
+                        if sync.is_configured:
+                            sync.vote_strategy(sr.flags, success=True, fitness=sr.fitness, isp=isp_name)
+                    else:
+                        ui.warn(f"No fix for {fh}")
+                if solved and _active_process:
+                    _stop_permanent_zapret(_active_process)
+                    _wd_extra = solver.build_extra_profiles(lua_dir)
+                    _active_process = _start_permanent_zapret(
+                        zapret_bin, lua_dir, _wd_flags, hostlist,
+                        _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
+                    )
+                    if _active_process:
+                        ui.ok("Restarted with per-host profiles")
+                if sync.is_configured:
+                    sync.sync_now()
+                ui.separator()
+
+            # ── Full recovery cycle (degraded connection) ─────────────
+            if needs_recovery:
+                from brain.failure_analyzer import FailureAnalyzer
+                from brain.enumerator import StrategyEnumerator
+
+                ui.separator()
+                ui.warn("Connection degraded — autonomous recovery")
+
+                # Step 1: Classify
+                ui.step("Step 1: Block analysis...")
+                _rc = BlockageClassifier(timeout=5)
+                for fh in list(degraded)[:3]:
+                    try:
+                        a = _rc.classify(fh)
+                        ui.block_status(fh, a.block_type, a.confidence, a.evidence)
+                        ai_feedback.record_test([f"watchdog:{fh}"], 0.0, failure_mode=a.block_type.lower())
+                    except Exception:
+                        pass
+
+                # Step 2: AI analysis
+                report = None
+                ui.step("Step 2: Failure analysis...")
+                try:
+                    fa = FailureAnalyzer()
+                    report = fa.analyze(
+                        flags=_wd_flags, fitness=overall,
+                        host_results=health.get("hosts", {}),
+                        tspu_profile=tspu_profile,
+                    )
+                    ui.info(f"Root cause: {report.root_cause} ({report.confidence:.0%})")
+                    ui.detail(report.explanation[:120])
+                except Exception as fe:
+                    logger.warning("FailureAnalyzer: %s", fe)
+
+                _stop_permanent_zapret(_active_process)
+                _active_process = None
+                found_fix = False
+
+                # Step 2.5: Community
+                if sync.is_configured:
+                    ui.step("Step 2.5: Community strategy...")
+                    try:
+                        cs = sync.get_instant_strategy(isp_name, dpi_type)
+                        if cs and cs.get("flags"):
+                            fit = tester.test_strategy(cs["flags"])
+                            ai_feedback.record_test(cs["flags"], fit, "ok" if fit > 0.3 else "timeout")
+                            if fit > 0.5:
+                                ui.ok(f"Community fix! fitness={fit:.3f}")
+                                rec = manager.save_strategy(cs["flags"], fit, isp_name)
+                                _wd_sid = rec.id
+                                _wd_flags = list(cs["flags"])
+                                _active_process = _start_permanent_zapret(
+                                    zapret_bin, lua_dir, _wd_flags, hostlist,
+                                    _tspu_recommended_ttl, config,
+                                )
+                                found_fix = bool(_active_process)
+                    except Exception:
+                        pass
+
+                # Step 3: AI suggestion
+                if report and hasattr(report, 'improved_flags') and report.improved_flags and not found_fix:
+                    ui.step("Step 3: AI suggestion...")
+                    for imp in report.improved_flags[:2]:
+                        fit = tester.test_strategy(imp)
+                        ai_feedback.record_test(imp, fit, "ok" if fit > 0.3 else "timeout")
+                        if fit > 0.5:
+                            ui.ok(f"AI fix! fitness={fit:.3f}")
+                            rec = manager.save_strategy(imp, fit, isp_name)
+                            _wd_sid = rec.id
+                            _wd_flags = list(imp)
+                            _active_process = _start_permanent_zapret(
+                                zapret_bin, lua_dir, _wd_flags, hostlist,
+                                _tspu_recommended_ttl, config,
+                            )
+                            found_fix = bool(_active_process)
+                            if found_fix and sync.is_configured:
+                                sync.vote_strategy(imp, success=True, fitness=fit, isp=isp_name)
+                            break
+
+                # Step 4: Enumeration
+                if not found_fix:
+                    ui.step("Step 4: Fast enumeration...")
+                    excluded = ai_feedback.get_excluded_functions()
+                    en = StrategyEnumerator(excluded_functions=excluded)
+                    er = en.enumerate(
+                        tester, threshold=0.60,
+                        on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, 0.60),
+                    )
+                    if er:
+                        ui.ok(f"Found: {er['name']} (fitness={er['fitness']:.3f})")
+                        rec = manager.save_strategy(er["flags"], er["fitness"], isp_name)
+                        _wd_sid = rec.id
+                        _wd_flags = list(er["flags"])
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags, hostlist,
+                            _tspu_recommended_ttl, config,
+                        )
+                        found_fix = bool(_active_process)
+
+                # Step 5: GA
+                if not found_fix:
+                    ui.step("Step 5: GA evolution...")
+                    seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
+                    gb = _run_evolution(
+                        tester, _wd_ga_cfg, seeds, analytics, isp_name,
+                        ai_feedback=ai_feedback, dpi_type=dpi_type,
+                    )
+                    if gb and gb.fitness > 0.1:
+                        rec = manager.save_strategy(gb.flags, gb.fitness, isp_name)
+                        _wd_sid = rec.id
+                        _wd_flags = list(gb.flags)
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags, hostlist,
+                            _tspu_recommended_ttl, config,
+                        )
+                        found_fix = bool(_active_process)
+
+                # Step 6: Per-host
+                if found_fix and _active_process and _running:
+                    time.sleep(2)
+                    vf = _quick_connectivity_check(hosts)
+                    bad = [h for h, ok in vf.items() if not ok]
+                    if bad:
+                        ui.step(f"Step 6: Solving {len(bad)} host(s)...")
+                        from brain.host_solver import HostSolver
+                        sv = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                        for fh in bad[:2]:
+                            r = sv.solve(fh, isp=isp_name)
+                            if r:
+                                ui.ok(f"Solved {fh}: fitness={r.fitness:.3f}")
+                        _wd_extra = sv.build_extra_profiles(lua_dir)
+                        if _wd_extra:
+                            _stop_permanent_zapret(_active_process)
+                            _active_process = _start_permanent_zapret(
+                                zapret_bin, lua_dir, _wd_flags, hostlist,
+                                _tspu_recommended_ttl, config,
+                                extra_profiles=_wd_extra,
+                            )
+
+                # Sync
+                if sync.is_configured:
+                    sync.sync_now()
+
+                if found_fix:
+                    ui.ok("Recovery complete — bypass restored")
+                else:
+                    ui.warn("No fix found. Retrying next cycle.")
+                    # Keep old strategy as fallback
+                    if _active_process is None:
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags, hostlist,
+                            _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
+                        )
+                ui.separator()
+                # IMPORTANT: continue loop, don't break!
+
+        # Clean exit (Ctrl+C)
+        if _active_process:
+            _stop_permanent_zapret(_active_process)
+            _active_process = None
+
     # ─── AI Engine — reserved for per-host solving after community/enum ──
     # Community + enum are free and fast. AI Engine uses LLM (rate limited).
     # AI Engine activates in per-host solver for hosts that enum can't fix.
@@ -1149,24 +1491,9 @@ def main():
 
                     print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
 
-                    # Enter watchdog loop
-                    watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
-                    while _running:
-                        for _ in range(watchdog_interval):
-                            if not _running:
-                                break
-                            time.sleep(1)
-                        if not _running:
-                            break
-                        now = datetime.now().strftime("%H:%M")
-                        host_statuses = []
-                        for host in hosts:
-                            r = _curl_check_one(host, timeout=10)
-                            host_statuses.append((host, r["success"], r["latency_ms"]))
-                        health = analytics.get_all_hosts_health(hosts, minutes=10)
-                        ui.monitor_line(now, host_statuses, health["overall_rate"])
-                    if _active_process:
-                        _stop_permanent_zapret(_active_process)
+                    # Enter unified watchdog with auto-recovery
+                    _applied_flags = [f.strip() for f in strategy_str.split("|")]
+                    _unified_watchdog(_applied_flags, "ai_engine")
                     analytics.close()
                     return
         except Exception as exc:
@@ -1279,119 +1606,8 @@ def main():
                             except Exception as exc:
                                 logger.debug("ByeDPI launch failed: %s", exc)
 
-                        # Save current strategy flags for restart after discovery
-                        _current_flags = list(community["flags"])
-
-                        # ── Discovery pipeline: auto-detect & solve new blocked domains ──
-                        from brain.discovery import DiscoveryPipeline
-                        from brain.host_solver import HostSolver
-                        _discovery_solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                        _discovery = DiscoveryPipeline(
-                            config, tester=tester, classifier=classifier,
-                            host_solver=_discovery_solver, proxy_router=router,
-                            server_sync=sync, isp=isp_name,
-                        )
-
-                        # Watchdog loop with hostlist-auto monitoring
-                        watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
-                        _known_auto_hosts = set()
-                        # Load existing hostlist-auto entries
-                        _auto_path = Path(zapret_bin).parent / "hostlist-auto.txt" if zapret_bin else None
-                        if _auto_path and _auto_path.exists():
-                            _known_auto_hosts = set(_auto_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines())
-
-                        while _running:
-                            for _ in range(watchdog_interval):
-                                if not _running:
-                                    break
-                                time.sleep(1)
-                            if not _running:
-                                break
-                            now = datetime.now().strftime("%H:%M")
-
-                            # Check monitored hosts
-                            host_statuses = []
-                            for host in hosts:
-                                r = _curl_check_one(host, timeout=10)
-                                host_statuses.append((host, r["success"], r["latency_ms"]))
-                            health = analytics.get_all_hosts_health(hosts, minutes=10)
-                            ui.monitor_line(now, host_statuses, health["overall_rate"])
-
-                            # Monitor hostlist-auto for newly blocked domains
-                            if _auto_path and _auto_path.exists():
-                                try:
-                                    current_auto = set(_auto_path.read_text(encoding="utf-8", errors="ignore").strip().splitlines())
-                                    new_domains = current_auto - _known_auto_hosts
-                                    if new_domains:
-                                        real_new = [d for d in new_domains if d.strip() and not d.startswith("#")]
-                                        if real_new:
-                                            print(f"  [{now}] New blocked domains detected: {', '.join(list(real_new)[:3])}")
-                                            # ── Discovery pipeline: classify → solve → report ──
-                                            # Stop zapret2 briefly to let solver test
-                                            _stop_permanent_zapret(_active_process)
-                                            _active_process = None
-                                            time.sleep(1)
-
-                                            try:
-                                                disc_results = _discovery.process_new_domains(real_new)
-                                                for dr in disc_results:
-                                                    if dr.solved:
-                                                        print(f"  [{now}] SOLVED: {dr.domain} → fitness={dr.fitness:.3f}"
-                                                              f"{' (shared)' if dr.reported_to_server else ''}")
-                                                    elif dr.route == "proxy":
-                                                        print(f"  [{now}] {dr.domain} → IP-blocked (proxy needed)")
-                                                    else:
-                                                        print(f"  [{now}] {dr.domain} → {dr.block_type} (unsolved)")
-                                            except Exception as disc_exc:
-                                                logger.warning("Discovery failed: %s", disc_exc)
-                                            finally:
-                                                # ALWAYS restart zapret2 — even if discovery crashed
-                                                extra = _discovery.get_extra_profiles() if _discovery else []
-                                                _active_process = _start_permanent_zapret(
-                                                    zapret_bin, lua_dir, _current_flags, hostlist,
-                                                    _tspu_recommended_ttl, config, extra_profiles=extra,
-                                                )
-                                        _known_auto_hosts = current_auto
-                                except Exception as exc:
-                                    logger.debug("Discovery pipeline error: %s", exc)
-                                    # If _active_process died, restart it
-                                    if _active_process is None:
-                                        _active_process = _start_permanent_zapret(
-                                            zapret_bin, lua_dir, _current_flags, hostlist,
-                                            _tspu_recommended_ttl, config,
-                                        )
-
-                            if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
-                                ui.warn("Health degraded, searching better strategy...")
-                                _stop_permanent_zapret(_active_process)
-                                _active_process = None
-                                try:
-                                    # Re-enumerate and apply
-                                    from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
-                                    excluded = ai_feedback.get_excluded_functions()
-                                    enum = StrategyEnumerator(excluded_functions=excluded)
-                                    new_result = enum.enumerate(tester, threshold=0.65,
-                                        on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
-                                    if new_result:
-                                        community["flags"] = new_result["flags"]
-                                        _current_flags = list(new_result["flags"])
-                                        _active_process = _start_permanent_zapret(
-                                            zapret_bin, lua_dir, new_result["flags"],
-                                            hostlist, _tspu_recommended_ttl, config)
-                                        if _active_process:
-                                            print(f"  [OK] New strategy: {' | '.join(new_result['flags'])} (fitness={new_result['fitness']:.3f})")
-                                            continue  # back to watchdog loop
-                                except Exception as renum_exc:
-                                    logger.warning("Re-enumeration failed: %s", renum_exc)
-                                # If re-enum failed, restart with old strategy before breaking
-                                if _active_process is None:
-                                    _active_process = _start_permanent_zapret(
-                                        zapret_bin, lua_dir, _current_flags, hostlist,
-                                        _tspu_recommended_ttl, config,
-                                    )
-                                break
-                        if _running and _active_process:
-                            _stop_permanent_zapret(_active_process)
+                        # Enter unified watchdog with auto-recovery
+                        _unified_watchdog(list(community["flags"]), record.id)
                         analytics.close()
                         return
             else:
@@ -1433,55 +1649,9 @@ def main():
                     print(f"\n  Tier:     {tier.get_status_line()}")
                     print(f"  Donate:   {donate.page_url}")
                     print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
-
-                    # Go to watchdog
-                    watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
-                    fail_threshold = config.get("watchdog_fail_threshold", 2)
-                    min_fitness = config.get("watchdog_min_fitness", 0.6)
-                    active_strategy_id = record.id
-                    ga_config = GAConfig.from_config(config)
-                    ga_config.generations = min(ga_config.generations, 15)
-                    ga_config.population_size = min(ga_config.population_size, 10)
-
-                    while _running:
-                        for _ in range(watchdog_interval):
-                            if not _running:
-                                break
-                            time.sleep(1)
-                        if not _running:
-                            break
-
-                        now = datetime.now().strftime("%H:%M")
-                        status_parts = []
-                        for host in hosts:
-                            r = _curl_check_one(host, timeout=10)
-                            analytics.log_test_result(
-                                strategy_id=active_strategy_id,
-                                host=host, http_code=r["http_code"],
-                                success=r["success"], latency_ms=r["latency_ms"],
-                                error_type=r["error_type"],
-                            )
-                            short = host.replace(".com", "").replace(".discordapp", "")
-                            if r["success"]:
-                                status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
-                            else:
-                                err = r["error_type"] or "FAIL"
-                                status_parts.append(f"{short}:{err.upper()}")
-
-                        health = analytics.get_all_hosts_health(hosts, minutes=10)
-                        print(f"  [{now}] {' | '.join(status_parts)}  (health={health['overall_rate']:.0%})")
-
-                        if health["overall_rate"] < min_fitness:
-                            print(f"\n  [!] Health degraded, re-evolving...")
-                            _stop_permanent_zapret(_active_process)
-                            _active_process = None
-                            break  # Fall through to evolution
-
-                    if _running and _active_process:
-                        # Clean exit from watchdog
-                        _stop_permanent_zapret(_active_process)
-                        analytics.close()
-                        return
+                    _unified_watchdog(best_flags, record.id)
+                    analytics.close()
+                    return
                 else:
                     print("\n  [!] Cached strategy failed verification, evolving...")
                     _stop_permanent_zapret(_active_process)
@@ -1590,55 +1760,7 @@ def main():
                             print(f"  [!] No strategy found for {fh}")
 
                 print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
-
-                # Watchdog for enumerated strategy
-                watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
-                active_strategy_id = record.id
-                _watchdog_checks = 0
-                _donate_shown = False
-                _donate_notified = False
-                while _running:
-                    for _ in range(watchdog_interval):
-                        if not _running:
-                            break
-                        time.sleep(1)
-                    if not _running:
-                        break
-                    _watchdog_checks += 1
-                    now = datetime.now().strftime("%H:%M")
-                    status_parts = []
-                    for host in hosts:
-                        r = _curl_check_one(host, timeout=10)
-                        analytics.log_test_result(
-                            strategy_id=active_strategy_id,
-                            host=host, http_code=r["http_code"],
-                            success=r["success"], latency_ms=r["latency_ms"],
-                            error_type=r["error_type"],
-                        )
-                        short = host.replace(".com", "").replace(".discordapp", "")
-                        if r["success"]:
-                            status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
-                        else:
-                            status_parts.append(f"{short}:{(r['error_type'] or 'FAIL').upper()}")
-                    health = analytics.get_all_hosts_health(hosts, minutes=10)
-                    print(f"  [{now}] {' | '.join(status_parts)}  (health={health['overall_rate']:.0%})")
-
-                    # Donate reminder: terminal at 10 min, notification at 30 min
-                    if _watchdog_checks == 2 and not _donate_shown:
-                        ui.donate_reminder(donate.page_url, tier.tier)
-                        _donate_shown = True
-                    if _watchdog_checks == 6 and not _donate_notified:
-                        ui.donate_notification(donate.page_url)
-                        _donate_notified = True
-
-                    if health["overall_rate"] < config.get("watchdog_min_fitness", 0.6):
-                        print(f"\n  [!] Health degraded, re-evolving...")
-                        _stop_permanent_zapret(_active_process)
-                        _active_process = None
-                        break
-                # Clean exit or degraded — either way we're done
-                if _running and _active_process:
-                    _stop_permanent_zapret(_active_process)
+                _unified_watchdog(best_flags, record.id)
                 analytics.close()
                 return
             else:
@@ -1739,263 +1861,8 @@ def main():
         print("  Monitoring connection... (Ctrl+C to stop)")
         print()
 
-    # ─── Watchdog loop ────────────────────────────────────────────────
-    watchdog_interval = config.get("watchdog_interval_minutes", 5) * 60
-    fail_threshold = config.get("watchdog_fail_threshold", 2)
-    min_fitness = config.get("watchdog_min_fitness", 0.6)
-    cycle_num = 0
-    active_strategy_id = record.id if record else "unknown"
-
-    while _running:
-        # Sleep in small chunks
-        for _ in range(watchdog_interval):
-            if not _running:
-                break
-            time.sleep(1)
-
-        if not _running:
-            break
-
-        # ── Detailed connectivity check with latency ──────────────
-        now = datetime.now().strftime("%H:%M")
-        status_parts = []
-        for host in hosts:
-            r = _curl_check_one(host, timeout=10)
-            # Log every check to analytics for streak tracking
-            analytics.log_test_result(
-                strategy_id=active_strategy_id,
-                host=host, http_code=r["http_code"],
-                success=r["success"], latency_ms=r["latency_ms"],
-                error_type=r["error_type"],
-            )
-            short = host.replace(".com", "")
-            if r["success"]:
-                status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
-            else:
-                err = r["error_type"] or "FAIL"
-                status_parts.append(f"{short}:{err.upper()}")
-
-        # ── Get rolling health from analytics ─────────────────────
-        health = analytics.get_all_hosts_health(hosts, minutes=10)
-        overall = health["overall_rate"]
-        degraded = health["degraded"]
-
-        print(f"  [{now}] {' | '.join(status_parts)}  (health={overall:.0%})")
-
-        # ── Check streak-based triggers ───────────────────────────
-        # Re-evolve if: overall health drops below threshold, OR
-        # any host has 3+ consecutive failures (streak_fail >= 3)
-        needs_reevolve = False
-        if overall < min_fitness:
-            needs_reevolve = True
-            print(f"  [!] Health degraded: {overall:.0%} < {min_fitness:.0%}")
-
-        for host in hosts:
-            h = health["hosts"].get(host, {})
-            streak_fail = h.get("streak_fail", 0)
-            if streak_fail >= fail_threshold:
-                needs_reevolve = True
-                print(f"  [!] {host}: {streak_fail} consecutive failures")
-
-        # ── Per-host problem solving (without breaking working hosts) ──
-        # If some hosts fail but overall health is OK, try to find
-        # a separate strategy for each failing host
-        persistent_fails = [
-            h for h in hosts
-            if health["hosts"].get(h, {}).get("streak_fail", 0) >= 3
-            and not needs_reevolve
-        ]
-        if persistent_fails and not needs_reevolve:
-            from brain.host_solver import HostSolver
-
-            ui.separator()
-            ui.warn(f"Persistent failures: {', '.join(persistent_fails)}")
-            ui.info("Searching for per-host strategies...")
-
-            solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-            solved_any = False
-
-            for fail_host in persistent_fails[:2]:
-                # Skip if already solved
-                cached = solver.get(fail_host)
-                if cached:
-                    ui.info(f"{fail_host}: already solved (fitness={cached.fitness:.3f})")
-                    continue
-
-                ui.step(f"Solving: {fail_host}")
-
-                def _solve_progress(i, total, name, fitness):
-                    status = "OK" if fitness > 0.3 else ""
-                    ui.detail(f"[{i}/{total}] {name}: {fitness:.3f} {status}")
-
-                result = solver.solve(
-                    fail_host, isp=isp_name,
-                    on_progress=_solve_progress,
-                )
-
-                if result:
-                    ui.ok(f"Found strategy for {fail_host}! fitness={result.fitness:.3f}")
-                    ui.detail(f"Strategy: {' | '.join(result.flags)}")
-                    solved_any = True
-
-                    # Report to server
-                    if sync.is_configured:
-                        sync.vote_strategy(
-                            result.flags, success=True, fitness=result.fitness,
-                            isp=isp_name,
-                        )
-                else:
-                    ui.warn(f"No strategy found for {fail_host}")
-
-            # If we found per-host fixes, restart winws2 with extra profiles
-            if solved_any and _active_process:
-                ui.info("Restarting winws2 with per-host profiles...")
-                _stop_permanent_zapret(_active_process)
-                _active_process = None
-
-                main_flags = best.flags if best else []
-                extra = solver.build_extra_profiles(lua_dir)
-                _active_process = _start_permanent_zapret(
-                    zapret_bin, lua_dir, main_flags, hostlist,
-                    _tspu_recommended_ttl, config,
-                    extra_profiles=extra,
-                )
-                if _active_process:
-                    ui.ok(f"winws2 restarted with {len(extra)//4 if extra else 0} per-host profiles")
-
-            if sync.is_configured:
-                sync.sync_now()
-
-            ui.separator()
-
-        if needs_reevolve:
-            from brain.block_classifier import BlockageClassifier
-            from brain.failure_analyzer import FailureAnalyzer
-            from brain.enumerator import StrategyEnumerator, KNOWN_STRATEGIES
-
-            ui.separator()
-            ui.warn("Connection degraded — starting autonomous recovery cycle")
-
-            # ── Step 1: Classify what's broken ───────────────────────
-            ui.step("Step 1: Analyzing block type...")
-            classifier = BlockageClassifier(timeout=5)
-            failed_hosts = [h for h in degraded]
-            for fh in failed_hosts[:3]:
-                analysis = classifier.classify(fh)
-                ui.block_status(fh, analysis.block_type, analysis.confidence, analysis.evidence)
-                # Record for AI feedback
-                ai_feedback.record_test(
-                    [f"watchdog_check:{fh}"], 0.0,
-                    failure_mode=analysis.block_type.lower(),
-                )
-
-            # ── Step 2: AI analysis of failure ───────────────────────
-            ui.step("Step 2: AI analyzing failure pattern...")
-            analyzer = FailureAnalyzer()
-            report = analyzer.analyze(
-                flags=best.flags if best else [],
-                fitness=overall,
-                host_results=health.get("hosts", {}),
-                tspu_profile=tspu_profile,
-            )
-            ui.info(f"Root cause: {report.root_cause} ({report.confidence:.0%})")
-            ui.detail(report.explanation[:120])
-            for change in report.changes[:2]:
-                ui.detail(f"Suggestion: {change.action} {change.target} → {change.new_value}")
-
-            # ── Step 2.5: Community strategy (fastest fix) ───────────
-            _stop_permanent_zapret(_active_process)
-            _active_process = None
-            cycle_num += 1
-            found_fix = False
-
-            if sync.is_configured:
-                ui.step("Step 2.5: Community strategy...")
-                community_s = sync.get_instant_strategy(isp_name, dpi_type)
-                if community_s and community_s.get("flags"):
-                    fit = tester.test_strategy(community_s["flags"])
-                    ai_feedback.record_test(community_s["flags"], fit, "ok" if fit > 0.3 else "timeout")
-                    if fit > 0.5:
-                        ui.ok(f"Community fix works! fitness={fit:.3f}")
-                        record = manager.save_strategy(community_s["flags"], fit, isp_name)
-                        active_strategy_id = record.id
-                        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, community_s["flags"], hostlist, _tspu_recommended_ttl, config)
-                        found_fix = bool(_active_process)
-
-            # ── Step 3: Try AI-suggested fix ─────────────────────────
-            if report.improved_flags and not found_fix:
-                ui.step("Step 3: Testing AI suggestion...")
-                for improved in report.improved_flags[:2]:
-                    fit = tester.test_strategy(improved)
-                    ai_feedback.record_test(improved, fit, "ok" if fit > 0.3 else "timeout")
-                    if fit > 0.5:
-                        ui.ok(f"AI fix works! fitness={fit:.3f}")
-                        record = manager.save_strategy(improved, fit, isp_name)
-                        active_strategy_id = record.id
-                        _active_process = _start_permanent_zapret(zapret_bin, lua_dir, improved, hostlist, _tspu_recommended_ttl, config)
-                        found_fix = bool(_active_process)
-                        if found_fix:
-                            sync.vote_strategy(improved, success=True, fitness=fit, isp=isp_name)
-                            break
-
-            # ── Step 4: Fast enumeration if AI didn't help ───────────
-            # threshold=0.60 rejects throttled strategies (fitness≈0.25-0.35)
-            if not found_fix:
-                ui.step("Step 4: Fast enumeration (anti-throttle first)...")
-                excluded = ai_feedback.get_excluded_functions()
-                enum = StrategyEnumerator(excluded_functions=excluded)
-                result = enum.enumerate(tester, threshold=0.60,
-                    on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, 0.60))
-                if result:
-                    ui.ok(f"Found: {result['name']} (fitness={result['fitness']:.3f})")
-                    record = manager.save_strategy(result["flags"], result["fitness"], isp_name)
-                    active_strategy_id = record.id
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, result["flags"], hostlist, _tspu_recommended_ttl, config)
-                    found_fix = bool(_active_process)
-
-            # ── Step 5: GA evolution as last resort ──────────────────
-            if not found_fix:
-                ui.step("Step 5: GA evolution (last resort)...")
-                seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
-                best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type)
-                if best and best.fitness > 0.1:
-                    record = manager.save_strategy(best.flags, best.fitness, isp_name)
-                    active_strategy_id = record.id
-                    _active_process = _start_permanent_zapret(zapret_bin, lua_dir, best.flags, hostlist, _tspu_recommended_ttl, config)
-                    found_fix = bool(_active_process)
-
-            # ── Step 6: Per-host solving for remaining failures ───────
-            if found_fix and _active_process and _running:
-                time.sleep(2)
-                verify_after = _quick_connectivity_check(hosts)
-                still_failed = [h for h, ok_v in verify_after.items() if not ok_v]
-                if still_failed:
-                    ui.step(f"Step 6: Solving {len(still_failed)} remaining host(s)...")
-                    from brain.host_solver import HostSolver
-                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                    for fh in still_failed[:2]:
-                        result = solver.solve(fh, isp=isp_name)
-                        if result:
-                            ui.ok(f"Solved {fh}: fitness={result.fitness:.3f}")
-                    extra = solver.build_extra_profiles(lua_dir)
-                    if extra:
-                        _stop_permanent_zapret(_active_process)
-                        main_flags = best.flags if best else []
-                        _active_process = _start_permanent_zapret(
-                            zapret_bin, lua_dir, main_flags, hostlist,
-                            _tspu_recommended_ttl, config, extra_profiles=extra,
-                        )
-                        ui.ok(f"Restarted with {len(extra)//4} per-host profiles")
-
-            # ── Step 7: Report to server ──────────────────────────────
-            if sync.is_configured:
-                sync.sync_now()
-
-            if found_fix:
-                ui.ok(f"Recovery complete — bypass restored")
-            else:
-                ui.warn("Could not find working strategy. Will retry next cycle.")
-            ui.separator()
+    # ─── Unified watchdog with auto-recovery ─────────────────────────
+    _unified_watchdog(best.flags if best else [], record.id if record else "unknown")
 
     # ─── Shutdown ─────────────────────────────────────────────────────
     print()
