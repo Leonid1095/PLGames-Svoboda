@@ -346,10 +346,22 @@ def _start_permanent_zapret(
     # ══════════════════════════════════════════════════════════════
     # Domains that need special handling (excluded from aggressive desync)
     # ══════════════════════════════════════════════════════════════
-    _yt_video_domains = "googlevideo.com,youtube.com,youtu.be"  # video streaming — desync needed for SNI proxy
-    _yt_image_domains = "ytimg.com,ggpht.com,googleapis.com"    # thumbnails/images — split only (fake corrupts CDN)
+    # YouTube video: all domains that serve video streams or YouTube API
+    # (from OWX-FIX list-google.txt + own testing)
+    _yt_video_domains = (
+        "googlevideo.com,youtube.com,youtu.be,youtube-nocookie.com,"
+        "youtubei.googleapis.com,youtube-ui.l.google.com,"
+        "wide-youtube.l.google.com,yt-video-upload.l.google.com"
+    )
+    # YouTube images: CDN for thumbnails/avatars (NO aggressive desync)
+    _yt_image_domains = "ytimg.com,ytimg.l.google.com,ggpht.com,googleusercontent.com,jnn-pa.googleapis.com"
     _yt_cdn_domains = f"{_yt_video_domains},{_yt_image_domains}"
-    _discord_domains = "discord.com,discordapp.com,discordapp.net,discord.gg,discord.media,discordcdn.com"
+    # Discord: all subdomains (from OWX-FIX list-general.txt)
+    _discord_domains = (
+        "discord.com,discordapp.com,discordapp.net,discord.gg,"
+        "discord.media,discordcdn.com,discord.app,discord.dev,"
+        "gateway.discord.gg,updates.discord.com"
+    )
     # Critical services that must NEVER be desync'd (breaks Claude Code, Steam, etc.)
     _never_desync = "anthropic.com,claude.ai,openai.com,cursor.sh,github.com,githubusercontent.com,steam.com,steampowered.com,steamstatic.com,microsoft.com,visualstudio.com"
     _gentle_exclude = f"{_yt_cdn_domains},{_discord_domains},{_never_desync}"
