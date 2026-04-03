@@ -406,19 +406,12 @@ class ConnectionTester:
     # ─── Shadow zapret2 management ─────────────────────────────────────────
 
     def _start_shadow_zapret(self, flags: list[str]) -> None:
-        """Start separate zapret2 instance for testing."""
-        self._stop_shadow_zapret()
+        """Start separate zapret2 instance for testing.
 
-        # Kill any leftover winws2 (permanent or crashed shadow)
-        if self._is_windows:
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/IM", "winws2.exe"],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
-                )
-                time.sleep(0.5)
-            except Exception:
-                pass
+        NOTE: Caller must stop permanent zapret2 before calling this.
+        We only kill the previous shadow instance (by PID), not all winws2.
+        """
+        self._stop_shadow_zapret()
 
         cmd = [str(self._zapret_bin)]
 
@@ -515,11 +508,11 @@ class ConnectionTester:
         except Exception as exc:
             logger.warning("Error stopping shadow zapret2: %s", exc)
 
-        # Fallback: force-kill any remaining winws2 processes
+        # Fallback: kill by PID only (not all winws2 — permanent instance may be running)
         if self._is_windows:
             try:
                 subprocess.run(
-                    ["taskkill", "/F", "/IM", "winws2.exe"],
+                    ["taskkill", "/F", "/PID", str(proc.pid)],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     timeout=3,
                 )

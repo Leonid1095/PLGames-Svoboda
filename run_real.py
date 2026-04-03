@@ -575,7 +575,7 @@ def _flush_dns_cache() -> None:
                 ["ipconfig", "/flushdns"],
                 capture_output=True, timeout=5,
             )
-            log.debug("DNS cache flushed (ipconfig /flushdns)")
+            logger.debug("DNS cache flushed (ipconfig /flushdns)")
         else:
             # Linux: systemd-resolved
             subprocess.run(
@@ -698,7 +698,7 @@ def _curl_check_one(host: str, timeout: int = 5) -> dict:
 
 
 def main():
-    global _running, _active_process
+    global _running, _active_process, _tspu_recommended_ttl
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
@@ -1206,36 +1206,45 @@ def main():
                 ui.separator()
                 ui.warn(f"Persistent failures: {', '.join(pfails)}")
                 ui.info("Searching per-host strategies...")
+                # Stop permanent zapret BEFORE solving — shadow tester
+                # does taskkill /F /IM winws2.exe which would kill it anyway,
+                # leaving _active_process as a stale reference.
+                _stop_permanent_zapret(_active_process)
+                _active_process = None
                 solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
                 solved = False
-                for fh in pfails[:2]:
-                    if solver.get(fh):
-                        ui.info(f"{fh}: already solved")
-                        continue
-                    ui.step(f"Solving: {fh}")
-                    sr = solver.solve(fh, isp=isp_name)
-                    if sr:
-                        ui.ok(f"{fh}: fitness={sr.fitness:.3f}")
-                        solved = True
-                        if sync.is_configured:
-                            sync.vote_strategy(sr.flags, success=True, fitness=sr.fitness, isp=isp_name)
-                    else:
-                        ui.warn(f"No fix for {fh}")
-                if solved and _active_process:
-                    _stop_permanent_zapret(_active_process)
-                    _wd_extra = solver.build_extra_profiles(lua_dir)
+                try:
+                    for fh in pfails[:2]:
+                        if solver.get(fh):
+                            ui.info(f"{fh}: already solved")
+                            continue
+                        ui.step(f"Solving: {fh}")
+                        sr = solver.solve(fh, isp=isp_name)
+                        if sr:
+                            ui.ok(f"{fh}: fitness={sr.fitness:.3f}")
+                            solved = True
+                            if sync.is_configured:
+                                sync.vote_strategy(sr.flags, success=True, fitness=sr.fitness, isp=isp_name)
+                        else:
+                            ui.warn(f"No fix for {fh}")
+                finally:
+                    # Always restart permanent zapret (with or without per-host profiles)
+                    _wd_extra = solver.build_extra_profiles(lua_dir) if solved else None
                     _active_process = _start_permanent_zapret(
                         zapret_bin, lua_dir, _wd_flags, hostlist,
                         _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
                     )
-                    if _active_process:
-                        ui.ok("Restarted with per-host profiles")
-                    else:
+                    if not _active_process:
                         # Fallback: restart without per-host profiles
                         _active_process = _start_permanent_zapret(
                             zapret_bin, lua_dir, _wd_flags, hostlist,
                             _tspu_recommended_ttl, config,
                         )
+                    if _active_process:
+                        if solved:
+                            ui.ok("Restarted with per-host profiles")
+                        else:
+                            ui.ok("Permanent zapret restarted")
                 if sync.is_configured:
                     sync.sync_now()
                 ui.separator()
@@ -1365,14 +1374,18 @@ def main():
                     if bad:
                         ui.step(f"Step 6: Solving {len(bad)} host(s)...")
                         from brain.host_solver import HostSolver
+                        # Stop permanent zapret before per-host solving
+                        # (shadow tester needs exclusive WinDivert access)
+                        _stop_permanent_zapret(_active_process)
+                        _active_process = None
                         sv = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                        for fh in bad[:2]:
-                            r = sv.solve(fh, isp=isp_name)
-                            if r:
-                                ui.ok(f"Solved {fh}: fitness={r.fitness:.3f}")
-                        _wd_extra = sv.build_extra_profiles(lua_dir)
-                        if _wd_extra:
-                            _stop_permanent_zapret(_active_process)
+                        try:
+                            for fh in bad[:2]:
+                                r = sv.solve(fh, isp=isp_name)
+                                if r:
+                                    ui.ok(f"Solved {fh}: fitness={r.fitness:.3f}")
+                        finally:
+                            _wd_extra = sv.build_extra_profiles(lua_dir)
                             _active_process = _start_permanent_zapret(
                                 zapret_bin, lua_dir, _wd_flags, hostlist,
                                 _tspu_recommended_ttl, config,
@@ -1770,27 +1783,27 @@ def main():
                 failed_hosts = [h for h, ok in verify.items() if not ok]
                 if failed_hosts and _running:
                     from brain.host_solver import HostSolver
+                    # Stop permanent zapret — shadow tester needs exclusive WinDivert
+                    _stop_permanent_zapret(_active_process)
+                    _active_process = None
                     solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                    for fh in failed_hosts:
-                        if not _running:
-                            break
-                        print(f"\n  Solving: {fh}...")
-                        result = solver.solve(fh, isp=isp_name)
-                        if result:
-                            print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
-                            extra = solver.build_extra_profiles(lua_dir)
-                            if extra:
-                                _stop_permanent_zapret(_active_process)
-                                _active_process = _start_permanent_zapret(
-                                    zapret_bin, lua_dir, best_flags,
-                                    hostlist, _tspu_recommended_ttl, config,
-                                    extra_profiles=extra,
-                                )
-                                time.sleep(2)
-                                r = _curl_check_one(fh, timeout=8)
-                                print(f"    {fh}: {'OK' if r['success'] else 'FAIL'}")
-                        else:
-                            print(f"  [!] No strategy found for {fh}")
+                    try:
+                        for fh in failed_hosts:
+                            if not _running:
+                                break
+                            print(f"\n  Solving: {fh}...")
+                            result = solver.solve(fh, isp=isp_name)
+                            if result:
+                                print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
+                            else:
+                                print(f"  [!] No strategy found for {fh}")
+                    finally:
+                        extra = solver.build_extra_profiles(lua_dir)
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, best_flags,
+                            hostlist, _tspu_recommended_ttl, config,
+                            extra_profiles=extra,
+                        )
 
                 print(f"\n  Monitoring connection... (Ctrl+C to stop)\n")
                 _unified_watchdog(best_flags, record.id)
