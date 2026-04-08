@@ -348,8 +348,8 @@ class _RTCPeer:
                             "uid": uid, "ack": {"status": {"code": "OK"}},
                         }))
 
-                    # Subscriber SDP offer → answer, then publish
-                    if "subscriberSdpOffer" in msg and not pub_sent:
+                    # Subscriber SDP offer → answer (always, handles renegotiation)
+                    if "subscriberSdpOffer" in msg:
                         sdp_offer = msg["subscriberSdpOffer"]
                         await pc_sub.setRemoteDescription(
                             RTCSessionDescription(sdp=sdp_offer["sdp"], type="offer")
@@ -367,19 +367,19 @@ class _RTCPeer:
                             "uid": uid, "ack": {"status": {"code": "OK"}},
                         }))
 
-                        # Small delay before publisher offer
-                        await asyncio.sleep(0.3)
-
-                        offer = await pc_pub.createOffer()
-                        await pc_pub.setLocalDescription(offer)
-                        await self._ws.send(json.dumps({
-                            "uid": _uuid(),
-                            "publisherSdpOffer": {
-                                "pcSeq": 1,
-                                "sdp": pc_pub.localDescription.sdp,
-                            },
-                        }))
-                        pub_sent = True
+                        # Send publisher offer only once (first negotiation)
+                        if not pub_sent:
+                            await asyncio.sleep(0.3)
+                            offer = await pc_pub.createOffer()
+                            await pc_pub.setLocalDescription(offer)
+                            await self._ws.send(json.dumps({
+                                "uid": _uuid(),
+                                "publisherSdpOffer": {
+                                    "pcSeq": 1,
+                                    "sdp": pc_pub.localDescription.sdp,
+                                },
+                            }))
+                            pub_sent = True
 
                     # Publisher SDP answer
                     if "publisherSdpAnswer" in msg:
@@ -751,8 +751,20 @@ class TelemostTunnel:
         self._ready.set()
 
         # Keep running until stopped
+        _keepalive_tick = 0
         while self._running:
             await asyncio.sleep(1)
+            _keepalive_tick += 1
+
+            # Send keepalive every 30s to prevent Telemost 60s solo-participant kick
+            if _keepalive_tick % 30 == 0 and self._peer.is_connected and self._peer.dc:
+                try:
+                    # Tiny encrypted ping frame (stream 0, length 0 = no-op)
+                    ping_frame = b"\x00\x00\x00\x00"
+                    enc = crypto.encrypt(ping_frame)
+                    self._peer.dc.send(enc)
+                except Exception:
+                    pass
 
             # Check if DataChannel is still alive
             if not self._peer.is_connected:
