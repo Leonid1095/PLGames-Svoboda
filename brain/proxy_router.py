@@ -30,7 +30,7 @@ class RouteDecision:
     """Routing decision for a blocked host."""
     host: str
     block_type: str
-    route: str          # "zapret2" | "warp" | "user_proxy" | "byedpi" | "unroutable"
+    route: str          # "zapret2" | "warp" | "user_proxy" | "telemost" | "byedpi" | "unroutable"
     proxy_url: str = ""  # SOCKS5 URL if routed through proxy
     reason: str = ""
 
@@ -73,6 +73,7 @@ class ProxyRouter:
         self.config = config
         self._warp = None
         self._gost_tunnel = None
+        self._telemost = None
         self._user_proxy: str = config.get("user_proxy", "")
         self._is_windows = platform.system() == "Windows"
 
@@ -192,7 +193,51 @@ class ProxyRouter:
         except Exception as exc:
             logger.debug("WARP setup error: %s", exc)
 
-        # 3. Mark as unroutable
+        # 3. Try Telemost WebRTC tunnel (whitelist bypass)
+        try:
+            from brain.telemost_tunnel import TelemostTunnel
+            telemost_cfg = {
+                "telemost_room_id": self.config.get("telemost_room_id", ""),
+                "telemost_key": self.config.get("telemost_key", ""),
+                "telemost_socks_port": self.config.get("telemost_socks_port", 1083),
+            }
+            if telemost_cfg["telemost_room_id"] and telemost_cfg["telemost_key"]:
+                ok, dep_msg = TelemostTunnel.check_dependencies()
+                if ok:
+                    self._telemost = TelemostTunnel(telemost_cfg)
+                    started = False
+                    try:
+                        started = self._telemost.start(timeout=20)
+                        if started:
+                            test_host = plan.proxy_hosts[0]
+                            if self._test_proxy(self._telemost.local_proxy_url, test_host):
+                                plan.proxy_url = self._telemost.local_proxy_url
+                                plan.proxy_type = "telemost"
+                                for d in plan.decisions:
+                                    if d.route == "proxy":
+                                        d.proxy_url = self._telemost.local_proxy_url
+                                        d.route = "telemost"
+                                logger.info("Telemost tunnel ready for %d IP-blocked hosts", len(plan.proxy_hosts))
+                                return True
+                            else:
+                                logger.warning("Telemost tunnel up but can't reach %s", test_host)
+                        else:
+                            logger.warning("Telemost tunnel failed to start")
+                    except Exception as exc_inner:
+                        logger.debug("Telemost tunnel test error: %s", exc_inner)
+                    # Always stop if we didn't return True
+                    if started:
+                        self._telemost.stop()
+                    self._telemost = None
+                else:
+                    logger.debug("Telemost tunnel deps missing: %s", dep_msg)
+        except Exception as exc:
+            logger.debug("Telemost tunnel setup error: %s", exc)
+            if self._telemost:
+                self._telemost.stop()
+                self._telemost = None
+
+        # 4. Mark as unroutable
         for host in plan.proxy_hosts:
             plan.unroutable_hosts.append(host)
             for d in plan.decisions:
@@ -445,12 +490,15 @@ function FindProxyForURL(url, host) {{
             pass
 
     def shutdown(self) -> None:
-        """Clean up: remove system proxy, stop gost tunnel."""
+        """Clean up: remove system proxy, stop tunnels."""
         if self._is_windows and hasattr(self, '_old_proxy_pac'):
             self.clear_system_proxy()
         if self._gost_tunnel:
             self._gost_tunnel.stop()
             self._gost_tunnel = None
+        if getattr(self, '_telemost', None):
+            self._telemost.stop()
+            self._telemost = None
 
     # ─── Internal ─────────────────────────────────────────────────────
 

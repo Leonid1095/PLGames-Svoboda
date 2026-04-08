@@ -1200,6 +1200,7 @@ def main():
                 h for h in hosts
                 if health["hosts"].get(h, {}).get("streak_fail", 0) >= 3
                 and not needs_recovery
+                and (h not in blocked or blocked[h].block_type != "TLS_INTERFERENCE")
             ]
             if pfails:
                 from brain.host_solver import HostSolver
@@ -1333,9 +1334,10 @@ def main():
                     ui.step("Step 4: Fast enumeration...")
                     excluded = ai_feedback.get_excluded_functions()
                     en = StrategyEnumerator(excluded_functions=excluded)
+                    _wd_thr = 0.40 if (tspu_profile and "tspu" in getattr(tspu_profile, 'dpi_type', '').lower()) else 0.55
                     er = en.enumerate(
-                        tester, threshold=0.60,
-                        on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, 0.60),
+                        tester, threshold=_wd_thr,
+                        on_progress=lambda i, t, n, f: ui.enum_line(i, t, n, f, _wd_thr),
                     )
                     if er:
                         ui.ok(f"Found: {er['name']} (fitness={er['fitness']:.3f})")
@@ -1426,39 +1428,80 @@ def main():
             from brain.host_solver import HostSolver
 
             # Build tool handlers (accept **kwargs for flexible AI tool calls)
+            # NOTE: All tools that call tester must stop permanent zapret first
+            # (shadow winws2 can't run alongside permanent — WinDivert conflict)
             def _tool_run_enumerator(hosts=None, forbid_genes=None, stop_on_fitness=0.5, **kwargs):
+                global _active_process
                 from brain.enumerator import StrategyEnumerator
-                # AI may send exclude_fake=True or other variants — handle gracefully
                 if kwargs.get("exclude_fake"):
                     forbid_genes = (forbid_genes or []) + ["fake"]
                 excluded = set(forbid_genes or []) | ai_feedback.get_excluded_functions()
                 enum = StrategyEnumerator(excluded_functions=excluded)
                 best_fit, best_flags, best_name = 0.0, [], ""
-                for s in enum.strategies:
-                    if not _running:
-                        break
-                    fit = tester.test_strategy(s["flags"])
-                    # Record with per-host results for AI pattern analysis
-                    _hr = tester._last_report.host_results if tester._last_report else {}
-                    ai_feedback.record_test(s["flags"], fit, "ok" if fit > 0.3 else "timeout", host_results=_hr)
-                    if fit > best_fit:
-                        best_fit, best_flags, best_name = fit, s["flags"], s["name"]
-                    if fit >= stop_on_fitness:
-                        break
+                # Stop permanent so shadow tester can use WinDivert
+                _was_running = _active_process is not None
+                if _was_running:
+                    _stop_permanent_zapret(_active_process)
+                    _active_process = None
+                try:
+                    for s in enum.strategies:
+                        if not _running:
+                            break
+                        fit = tester.test_strategy(s["flags"])
+                        _hr = tester._last_report.host_results if tester._last_report else {}
+                        ai_feedback.record_test(s["flags"], fit, "ok" if fit > 0.3 else "timeout", host_results=_hr)
+                        if fit > best_fit:
+                            best_fit, best_flags, best_name = fit, s["flags"], s["name"]
+                        if fit >= stop_on_fitness:
+                            break
+                finally:
+                    # Restart permanent if it was running (unless apply_strategy will do it)
+                    if _was_running and not _active_process:
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags if '_wd_flags' in dir() else best_flags,
+                            hostlist, _tspu_recommended_ttl, config,
+                        )
                 return {"strategy": " | ".join(best_flags), "fitness": best_fit, "name": best_name}
 
             def _tool_per_host_solver(host="", **kwargs):
-                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                result = solver.solve(host, isp=isp_name)
-                if result:
-                    return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
-                return {"strategy": "", "fitness": 0.0}
+                global _active_process
+                # TLS_INTERFERENCE means IP-level block — desync can't fix it, skip immediately
+                if blocked.get(host) and blocked[host].block_type == "TLS_INTERFERENCE":
+                    return {"strategy": "", "fitness": 0.0, "reason": "TLS_INTERFERENCE — proxy only, desync won't help"}
+                _was_running = _active_process is not None
+                if _was_running:
+                    _stop_permanent_zapret(_active_process)
+                    _active_process = None
+                try:
+                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                    result = solver.solve(host, isp=isp_name)
+                    if result:
+                        return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
+                    return {"strategy": "", "fitness": 0.0}
+                finally:
+                    if _was_running and not _active_process:
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, _wd_flags if '_wd_flags' in dir() else [],
+                            hostlist, _tspu_recommended_ttl, config,
+                        )
 
             def _tool_test_strategy(strategy="", hosts=None, **kwargs):
+                global _active_process
                 flags = [f.strip() for f in strategy.split("|")]
-                fit = tester.test_strategy(flags)
-                verify = _quick_connectivity_check(hosts or list(blocked.keys()))
-                return {"fitness": fit, "host_status": {h: ok for h, ok in verify.items()}}
+                _was_running = _active_process is not None
+                if _was_running:
+                    _stop_permanent_zapret(_active_process)
+                    _active_process = None
+                try:
+                    fit = tester.test_strategy(flags)
+                    verify = _quick_connectivity_check(hosts or list(blocked.keys()))
+                    return {"fitness": fit, "host_status": {h: ok for h, ok in verify.items()}}
+                finally:
+                    if _was_running and not _active_process:
+                        _active_process = _start_permanent_zapret(
+                            zapret_bin, lua_dir, flags, hostlist,
+                            _tspu_recommended_ttl, config,
+                        )
 
             def _tool_get_block_analysis(host="", **kwargs):
                 analysis = classifier.classify(host)
@@ -1590,8 +1633,9 @@ def main():
                         ui.bypass_active(working, total_h, " | ".join(community["flags"]),
                                          tier.get_status_line(), donate.page_url)
 
-                        # Immediately solve failed hosts
-                        failed_hosts = [h for h, ok_v in verify.items() if not ok_v]
+                        # Immediately solve failed hosts (skip TLS_INTERFERENCE — desync can't help)
+                        failed_hosts = [h for h, ok_v in verify.items() if not ok_v
+                                        and (h not in blocked or blocked[h].block_type != "TLS_INTERFERENCE")]
                         if failed_hosts and _running:
                             # Must stop permanent winws2 so shadow can use same ports
                             print(f"\n  {len(failed_hosts)} host(s) still blocked, searching solutions...")
@@ -1726,9 +1770,9 @@ def main():
     # formula. After fixing throttle_ms and removing WS test, strategies
     # typically score 0.55-0.70. Use lower threshold when TSPU is detected
     # so enum finds a working strategy fast instead of falling to slow GA.
-    enum_threshold = 0.60
+    enum_threshold = 0.55
     if tspu_profile and getattr(tspu_profile, 'dpi_type', None) and "tspu" in tspu_profile.dpi_type.lower():
-        enum_threshold = 0.45
+        enum_threshold = 0.40
         ui.info(f"TSPU detected → acceptance threshold {enum_threshold}")
 
     print(f"\n  Fast strategy enumeration ({len(priority_strategies)} strategies, AI-prioritized)...")
@@ -1779,8 +1823,9 @@ def main():
                 print(f"  Tier:     {tier.get_status_line()}")
                 print(f"  Donate:   {donate.page_url}")
 
-                # Immediately solve failed hosts
-                failed_hosts = [h for h, ok in verify.items() if not ok]
+                # Immediately solve failed hosts (skip TLS_INTERFERENCE — desync can't help)
+                failed_hosts = [h for h, ok in verify.items() if not ok
+                                and (h not in blocked or blocked[h].block_type != "TLS_INTERFERENCE")]
                 if failed_hosts and _running:
                     from brain.host_solver import HostSolver
                     # Stop permanent zapret — shadow tester needs exclusive WinDivert
@@ -1991,13 +2036,14 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                             print(f"  [OK] Community strategy: fitness={fit:.3f}")
 
                 # Step 2: Enumerator (~30-60 sec) if community failed
-                # threshold=0.60: rejects throttled strategies (fitness≈0.25-0.35)
+                # TSPU DPI reduces max achievable fitness (googlevideo TLS_INTERFERENCE
+                # always fails), so lower threshold to accept partial bypass
                 if not best_flags:
                     print("  Running enumerator (anti-throttle first)...")
                     from brain.enumerator import StrategyEnumerator
                     excluded = ai_feedback.get_excluded_functions() if ai_feedback else set()
                     enum = StrategyEnumerator(excluded_functions=excluded)
-                    result = enum.enumerate(tester, threshold=0.60,
+                    result = enum.enumerate(tester, threshold=0.40,
                         on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                     if result:
                         best_flags = result["flags"]

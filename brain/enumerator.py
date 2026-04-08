@@ -25,15 +25,78 @@ logger = logging.getLogger("svoboda.enumerator")
 
 KNOWN_STRATEGIES: list[dict] = [
     # ══════════════════════════════════════════════════════════════════
-    # COMMUNITY PROVEN (Flowseal ALT11, Dronatar v4.6 — Feb 2026)
-    # These are the exact strategies used by 15000+ users via Flowseal
-    # zapret-discord-youtube. Converted from zapret v1 dpi-desync to
-    # zapret2 lua-desync format. Tested FIRST as highest confidence.
+    # TIER 0: NO-FAKE STRATEGIES (TSPU-resistant)
+    # TSPU stateful DPI (er-telecom, 2026-04) detects and blocks ALL
+    # fake packets. Pure split/disorder strategies bypass SNI filtering
+    # without triggering fake detection. TESTED FIRST.
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "nofake_disorder_568",
+        "flags": [
+            "multisplit:pos=1:seqovl=568",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "No-fake: split@568 + disorder (proven on TSPU er-telecom Apr 2026)",
+    },
+    {
+        "name": "nofake_disorder_seqovl5",
+        "flags": [
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "No-fake: disorder with TLS record overlap (cached, proven)",
+    },
+    {
+        "name": "nofake_disorder_681",
+        "flags": [
+            "multisplit:pos=1:seqovl=681",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "No-fake: split@681 + disorder (Dronatar-style without fake)",
+    },
+    {
+        "name": "nofake_disorder_4096",
+        "flags": [
+            "multisplit:pos=1:seqovl=4096",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "No-fake: 4KB overlap + disorder (anti-throttle, no fake detection)",
+    },
+    {
+        "name": "nofake_multidisorder_681",
+        "flags": [
+            "multidisorder:pos=1,midsld:seqovl=681",
+        ],
+        "desc": "No-fake: pure disorder@681 (Dronatar v4.6 core)",
+    },
+    {
+        "name": "nofake_multisplit_4096",
+        "flags": [
+            "multisplit:pos=1:seqovl=4096",
+        ],
+        "desc": "No-fake: pure split 4KB overlap (overwhelms DPI state buffer)",
+    },
+    {
+        "name": "nofake_disorder_midsld_endhost",
+        "flags": [
+            "multidisorder:pos=1,midsld,endhost-1:seqovl=6:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "No-fake: 3-pos disorder with TLS overlap (max fragmentation)",
+    },
+    {
+        "name": "nofake_wssize1_disorder",
+        "flags": [
+            "wssize:wsize=1:scale=0",
+            "multidisorder:pos=1,midsld:seqovl=568",
+        ],
+        "desc": "No-fake: tiny window + disorder@568 (dual anti-throttle)",
+    },
+
+    # ══════════════════════════════════════════════════════════════════
+    # TIER 1: COMMUNITY PROVEN (Flowseal ALT11, Dronatar v4.6)
+    # These use fake packets — work on ISPs that don't detect fake.
     # ══════════════════════════════════════════════════════════════════
 
     # Flowseal ALT11: Google/YouTube profile (Feb 2026, most popular)
-    # Original: --dpi-desync=fake,multisplit --dpi-desync-split-seqovl=681
-    #           --dpi-desync-split-pos=1 --dpi-desync-fooling=ts --repeats=8
     {
         "name": "flowseal_alt11_google",
         "flags": [
@@ -52,7 +115,6 @@ KNOWN_STRATEGIES: list[dict] = [
         "desc": "Flowseal ALT11: General TLS (seqovl=664, Feb 2026)",
     },
     # Dronatar v4.6: YouTube TLS profile (Feb 2026)
-    # Original: --dpi-desync=multidisorder --split-pos=1,midsld --split-seqovl=681
     {
         "name": "dronatar_youtube",
         "flags": [

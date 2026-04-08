@@ -33,5 +33,6 @@ bin/
 .deepseek_key
 .install_id
 zapret2-*/
+_research/
 .claude/
 svoboda.log*

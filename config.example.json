@@ -39,5 +39,8 @@
   "shadow_cycle_minutes": 10,
   "morphing_enabled": true,
   "morphing_profile": "chrome_win",
-  "user_proxy": ""
+  "user_proxy": "",
+  "telemost_room_id": "",
+  "telemost_key": "",
+  "telemost_socks_port": 1083
 }
