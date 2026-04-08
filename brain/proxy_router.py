@@ -59,6 +59,9 @@ IP_BLOCKED_DOMAINS = {
     "linkedin.com", "www.linkedin.com",
     # Telegram Web (TCP OK, but all TLS to these IPs blocked)
     "web.telegram.org", "telegram.org", "t.me",
+    # YouTube video CDN — TLS_INTERFERENCE at er-telecom: desync fails (exit=60),
+    # must proxy. youtube.com itself works via desync, but video CDN does not.
+    "googlevideo.com",
     # Other
     "medium.com",
     "archive.org",
