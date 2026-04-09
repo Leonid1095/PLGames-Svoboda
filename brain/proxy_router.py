@@ -59,9 +59,8 @@ IP_BLOCKED_DOMAINS = {
     "linkedin.com", "www.linkedin.com",
     # Telegram Web (TCP OK, but all TLS to these IPs blocked)
     "web.telegram.org", "telegram.org", "t.me",
-    # YouTube video CDN — TLS_INTERFERENCE at er-telecom: desync fails (exit=60),
-    # must proxy. youtube.com itself works via desync, but video CDN does not.
-    "googlevideo.com",
+    # NOTE: googlevideo.com removed — TLS_INTERFERENCE is ISP-specific (er-telecom).
+    # On other ISPs desync works fine. Let classifier decide per-ISP.
     # Other
     "medium.com",
     "archive.org",
@@ -97,9 +96,10 @@ class ProxyRouter:
             if bt == "NOT_BLOCKED":
                 continue
 
-            # Check if this domain is known to be IP-blocked
+            # Check if this domain is known to be IP-blocked or TLS_INTERFERENCE
+            # (TLS_INTERFERENCE = DPI corrupts TLS handshake, desync can't fix)
             is_ip_blocked = (
-                bt in ("IP_BLOCK", "TLS_IP_BLOCK")
+                bt in ("IP_BLOCK", "TLS_IP_BLOCK", "TLS_INTERFERENCE")
                 or self._is_known_ip_blocked(host)
                 or getattr(analysis, 'recommended_params', {}).get("needs_proxy", False)
             )
@@ -240,13 +240,23 @@ class ProxyRouter:
                 self._telemost.stop()
                 self._telemost = None
 
-        # 4. Mark as unroutable
+        # 4. Mark remaining as unroutable, but fallback TLS_INTERFERENCE to zapret2
         for host in plan.proxy_hosts:
-            plan.unroutable_hosts.append(host)
-            for d in plan.decisions:
-                if d.host == host and d.route == "proxy":
-                    d.route = "unroutable"
-                    d.reason = "IP-blocked, no proxy available"
+            # TLS_INTERFERENCE: desync might partially work, better than nothing
+            host_bt = next((d.block_type for d in plan.decisions if d.host == host), "")
+            if host_bt == "TLS_INTERFERENCE":
+                plan.zapret2_hosts.append(host)
+                for d in plan.decisions:
+                    if d.host == host and d.route == "proxy":
+                        d.route = "zapret2"
+                        d.reason = "TLS_INTERFERENCE fallback to desync (no proxy)"
+                logger.info("TLS_INTERFERENCE fallback: %s → desync (no proxy available)", host)
+            else:
+                plan.unroutable_hosts.append(host)
+                for d in plan.decisions:
+                    if d.host == host and d.route == "proxy":
+                        d.route = "unroutable"
+                        d.reason = "IP-blocked, no proxy available"
 
         return False
 
