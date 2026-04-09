@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -91,6 +92,7 @@ class Analytics:
     def __init__(self, config: dict):
         base_dir = Path(config.get("_base_dir", "."))
         db_path = base_dir / config.get("analytics_db_path", "svoboda_analytics.db")
+        self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
@@ -99,7 +101,8 @@ class Analytics:
 
     def close(self) -> None:
         """Close DB connection."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     # ─── Strategy events ───────────────────────────────────────────────────
 
@@ -114,23 +117,25 @@ class Analytics:
         source: str = "local",
     ) -> None:
         """Record a strategy (new or updated)."""
-        self._conn.execute(
-            """INSERT OR REPLACE INTO strategies
-               (id, flags, fitness, isp, middlebox_type, region, created_at, source)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (strategy_id, json.dumps(flags), fitness, isp, middlebox_type, region,
-             datetime.now(timezone.utc).isoformat(), source),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT OR REPLACE INTO strategies
+                   (id, flags, fitness, isp, middlebox_type, region, created_at, source)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (strategy_id, json.dumps(flags), fitness, isp, middlebox_type, region,
+                 datetime.now(timezone.utc).isoformat(), source),
+            )
+            self._conn.commit()
 
     def log_strategy_result(self, strategy_id: str, success: bool) -> None:
         """Record a win or loss for a strategy."""
         col = "wins" if success else "losses"
-        self._conn.execute(
-            f"UPDATE strategies SET {col} = {col} + 1 WHERE id = ?",
-            (strategy_id,),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE strategies SET {col} = {col} + 1 WHERE id = ?",
+                (strategy_id,),
+            )
+            self._conn.commit()
 
     # ─── Test result events ────────────────────────────────────────────────
 
@@ -145,14 +150,15 @@ class Analytics:
     ) -> None:
         """Record a single connection test result."""
         try:
-            self._conn.execute(
-                """INSERT INTO test_results
-                   (strategy_id, host, http_code, success, latency_ms, error_type, tested_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (strategy_id, host, http_code, int(success), latency_ms, error_type,
-                 datetime.now(timezone.utc).isoformat()),
-            )
-            self._conn.commit()
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO test_results
+                       (strategy_id, host, http_code, success, latency_ms, error_type, tested_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (strategy_id, host, http_code, int(success), latency_ms, error_type,
+                     datetime.now(timezone.utc).isoformat()),
+                )
+                self._conn.commit()
         except Exception as exc:
             logger.debug("Failed to log test result: %s", exc)
 
@@ -168,14 +174,15 @@ class Analytics:
         isp: str = "unknown",
     ) -> None:
         """Record one generation of evolution."""
-        self._conn.execute(
-            """INSERT INTO evolution_log
-               (generation, best_fitness, avg_fitness, best_flags, population_size, isp, logged_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (generation, best_fitness, avg_fitness, json.dumps(best_flags),
-             population_size, isp, datetime.now(timezone.utc).isoformat()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO evolution_log
+                   (generation, best_fitness, avg_fitness, best_flags, population_size, isp, logged_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (generation, best_fitness, avg_fitness, json.dumps(best_flags),
+                 population_size, isp, datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
 
     # ─── ISP snapshot events ───────────────────────────────────────────────
 
@@ -191,16 +198,17 @@ class Analytics:
         middlebox_window: Optional[int],
     ) -> None:
         """Record an ISP/middlebox detection snapshot."""
-        self._conn.execute(
-            """INSERT INTO isp_snapshots
-               (external_ip, asn, isp_name, org, region,
-                middlebox_type, middlebox_ttl, middlebox_window, detected_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (external_ip, asn, isp_name, org, region,
-             middlebox_type, middlebox_ttl, middlebox_window,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """INSERT INTO isp_snapshots
+                   (external_ip, asn, isp_name, org, region,
+                    middlebox_type, middlebox_ttl, middlebox_window, detected_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (external_ip, asn, isp_name, org, region,
+                 middlebox_type, middlebox_ttl, middlebox_window,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
 
         # Queue for server sync
         self._enqueue_sync("isp_snapshot", {
@@ -227,11 +235,12 @@ class Analytics:
 
     def get_pending_sync(self, limit: int = 50) -> list[dict]:
         """Get pending sync items."""
-        cursor = self._conn.execute(
-            "SELECT id, payload, event_type, created_at FROM sync_queue WHERE synced = 0 ORDER BY id LIMIT ?",
-            (limit,),
-        )
-        rows = cursor.fetchall()
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT id, payload, event_type, created_at FROM sync_queue WHERE synced = 0 ORDER BY id LIMIT ?",
+                (limit,),
+            )
+            rows = cursor.fetchall()
         return [
             {"id": r[0], "payload": json.loads(r[1]), "event_type": r[2], "created_at": r[3]}
             for r in rows
@@ -242,37 +251,40 @@ class Analytics:
         if not sync_ids:
             return
         placeholders = ",".join("?" * len(sync_ids))
-        self._conn.execute(
-            f"UPDATE sync_queue SET synced = 1, synced_at = ? WHERE id IN ({placeholders})",
-            [datetime.now(timezone.utc).isoformat()] + sync_ids,
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                f"UPDATE sync_queue SET synced = 1, synced_at = ? WHERE id IN ({placeholders})",
+                [datetime.now(timezone.utc).isoformat()] + sync_ids,
+            )
+            self._conn.commit()
 
     # ─── Aggregation queries ───────────────────────────────────────────────
 
     def get_best_flags_for_isp(self, isp: str, limit: int = 5) -> list[dict]:
         """Get top strategies for a given ISP."""
-        cursor = self._conn.execute(
-            """SELECT flags, fitness, wins, losses FROM strategies
-               WHERE isp = ? ORDER BY fitness DESC LIMIT ?""",
-            (isp, limit),
-        )
-        return [
-            {"flags": json.loads(r[0]), "fitness": r[1], "wins": r[2], "losses": r[3]}
-            for r in cursor.fetchall()
-        ]
+        with self._lock:
+            cursor = self._conn.execute(
+                """SELECT flags, fitness, wins, losses FROM strategies
+                   WHERE isp = ? ORDER BY fitness DESC LIMIT ?""",
+                (isp, limit),
+            )
+            return [
+                {"flags": json.loads(r[0]), "fitness": r[1], "wins": r[2], "losses": r[3]}
+                for r in cursor.fetchall()
+            ]
 
     def get_host_success_rate(self, host: str, hours: int = 24) -> float:
         """Get success rate for a host over last N hours."""
-        cursor = self._conn.execute(
-            """SELECT COUNT(*) as total,
-                      SUM(success) as ok
-               FROM test_results
-               WHERE host = ?
-                 AND tested_at >= datetime('now', ?)""",
-            (host, f"-{hours} hours"),
-        )
-        row = cursor.fetchone()
+        with self._lock:
+            cursor = self._conn.execute(
+                """SELECT COUNT(*) as total,
+                          SUM(success) as ok
+                   FROM test_results
+                   WHERE host = ?
+                     AND tested_at >= datetime('now', ?)""",
+                (host, f"-{hours} hours"),
+            )
+            row = cursor.fetchone()
         if not row or row[0] == 0:
             return 0.0
         return row[1] / row[0]
@@ -291,15 +303,16 @@ class Analytics:
                 "error_types": {"rst": N, "timeout": N, ...}
             }
         """
-        cursor = self._conn.execute(
-            """SELECT success, latency_ms, http_code
-               FROM test_results
-               WHERE host = ?
-                 AND tested_at >= datetime('now', ?)
-               ORDER BY tested_at DESC""",
-            (host, f"-{minutes} minutes"),
-        )
-        rows = cursor.fetchall()
+        with self._lock:
+            cursor = self._conn.execute(
+                """SELECT success, latency_ms, http_code
+                   FROM test_results
+                   WHERE host = ?
+                     AND tested_at >= datetime('now', ?)
+                   ORDER BY tested_at DESC""",
+                (host, f"-{minutes} minutes"),
+            )
+            rows = cursor.fetchall()
         if not rows:
             return {
                 "total": 0, "successes": 0, "rate": 0.0,
@@ -374,20 +387,21 @@ class Analytics:
 
     def get_stats_summary(self) -> dict:
         """Overall statistics summary."""
-        cur = self._conn.cursor()
+        with self._lock:
+            cur = self._conn.cursor()
 
-        cur.execute("SELECT COUNT(*) FROM strategies")
-        total_strategies = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM strategies")
+            total_strategies = cur.fetchone()[0]
 
-        cur.execute("SELECT COUNT(*) FROM test_results")
-        total_tests = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM test_results")
+            total_tests = cur.fetchone()[0]
 
-        cur.execute("SELECT AVG(fitness) FROM strategies WHERE fitness > 0")
-        row = cur.fetchone()
-        avg_fitness = row[0] if row[0] else 0.0
+            cur.execute("SELECT AVG(fitness) FROM strategies WHERE fitness > 0")
+            row = cur.fetchone()
+            avg_fitness = row[0] if row[0] else 0.0
 
-        cur.execute("SELECT COUNT(*) FROM sync_queue WHERE synced = 0")
-        pending_sync = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(*) FROM sync_queue WHERE synced = 0")
+            pending_sync = cur.fetchone()[0]
 
         return {
             "total_strategies": total_strategies,
@@ -400,12 +414,13 @@ class Analytics:
 
     def _enqueue_sync(self, event_type: str, data: dict) -> None:
         """Add item to sync queue."""
-        self._conn.execute(
-            "INSERT INTO sync_queue (payload, event_type, created_at) VALUES (?, ?, ?)",
-            (json.dumps(data, ensure_ascii=False), event_type,
-             datetime.now(timezone.utc).isoformat()),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO sync_queue (payload, event_type, created_at) VALUES (?, ?, ?)",
+                (json.dumps(data, ensure_ascii=False), event_type,
+                 datetime.now(timezone.utc).isoformat()),
+            )
+            self._conn.commit()
 
     def _init_schema(self) -> None:
         """Initialize DB schema with migrations."""

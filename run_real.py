@@ -22,6 +22,7 @@ import signal
 import subprocess
 import sys
 import io
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
@@ -132,6 +133,7 @@ logger = logging.getLogger("svoboda")
 _running = True
 _active_process: Optional[subprocess.Popen] = None
 _tspu_recommended_ttl: int = 0  # set by TSPU profiler, used by permanent winws2
+_zapret_lock = threading.Lock()  # mutex for winws2 stop/start to prevent WinDivert conflicts
 
 
 def _signal_handler(signum, frame):
@@ -523,49 +525,51 @@ def _start_permanent_zapret(
 
     # Kill any existing winws2 before starting new one (prevents dual-process conflicts)
     # This is critical for early-start → full-start replacement
-    try:
-        if is_win:
-            subprocess.run(
-                ["taskkill", "/F", "/IM", "winws2.exe"],
-                capture_output=True, timeout=5,
+    # Thread-safe: _zapret_lock prevents concurrent kill+start from another thread
+    with _zapret_lock:
+        try:
+            if is_win:
+                subprocess.run(
+                    ["taskkill", "/F", "/IM", "winws2.exe"],
+                    capture_output=True, timeout=5,
+                )
+            else:
+                subprocess.run(["pkill", "-f", "nfqws2"], capture_output=True, timeout=5)
+            time.sleep(1)  # wait for WinDivert driver to unload
+        except Exception:
+            pass
+
+        log = logging.getLogger("svoboda")
+        log.info("Permanent winws2 cmd: %s", " ".join(cmd))
+        log.info("Permanent winws2 cwd: %s", cwd)
+
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                cwd=cwd,
+                creationflags=subprocess.CREATE_NO_WINDOW if is_win else 0,
             )
-        else:
-            subprocess.run(["pkill", "-f", "nfqws2"], capture_output=True, timeout=5)
-        time.sleep(1)  # wait for WinDivert driver to unload
-    except Exception:
-        pass
-
-    log = logging.getLogger("svoboda")
-    log.info("Permanent winws2 cmd: %s", " ".join(cmd))
-    log.info("Permanent winws2 cwd: %s", cwd)
-
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            cwd=cwd,
-            creationflags=subprocess.CREATE_NO_WINDOW if is_win else 0,
-        )
-        time.sleep(2)
-        if proc.poll() is not None:
-            # Process already exited — safe to read stderr (finite data)
-            try:
-                stderr_bytes, _ = proc.communicate(timeout=3)
-                stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
-            except Exception:
-                stderr = ""
-            print(f"  [ERROR] winws2 exited immediately: {stderr[:300]}")
-            log.error("Permanent winws2 crashed: %s", stderr[:500])
+            time.sleep(2)
+            if proc.poll() is not None:
+                # Process already exited — safe to read stderr (finite data)
+                try:
+                    stderr_bytes, _ = proc.communicate(timeout=3)
+                    stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+                except Exception:
+                    stderr = ""
+                print(f"  [ERROR] winws2 exited immediately: {stderr[:300]}")
+                log.error("Permanent winws2 crashed: %s", stderr[:500])
+                return None
+            log.info("Permanent winws2 started (pid=%d)", proc.pid)
+            # Flush DNS cache so browser picks up real IPs instead of cached blocked
+            _flush_dns_cache()
+            return proc
+        except Exception as exc:
+            print(f"  [ERROR] Failed to start winws2: {exc}")
+            log.error("Permanent winws2 launch error: %s", exc)
             return None
-        log.info("Permanent winws2 started (pid=%d)", proc.pid)
-        # Flush DNS cache so browser picks up real IPs instead of cached blocked
-        _flush_dns_cache()
-        return proc
-    except Exception as exc:
-        print(f"  [ERROR] Failed to start winws2: {exc}")
-        log.error("Permanent winws2 launch error: %s", exc)
-        return None
 
 
 def _flush_dns_cache() -> None:
@@ -623,22 +627,26 @@ def _restart_stuck_apps() -> None:
 
 
 def _stop_permanent_zapret(proc: Optional[subprocess.Popen]) -> None:
-    """Stop permanent winws2/nfqws2 instance + force kill ALL winws2."""
-    if proc is not None:
+    """Stop permanent winws2/nfqws2 instance + force kill ALL winws2.
+
+    Thread-safe: uses _zapret_lock to prevent concurrent stop/start.
+    """
+    with _zapret_lock:
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
+        # Force kill ALL winws2 instances to release WinDivert
         try:
-            proc.terminate()
-            proc.wait(timeout=3)
+            subprocess.run(
+                ["taskkill", "/F", "/IM", "winws2.exe"],
+                capture_output=True, timeout=5,
+            )
         except Exception:
             pass
-    # Force kill ALL winws2 instances to release WinDivert
-    try:
-        subprocess.run(
-            ["taskkill", "/F", "/IM", "winws2.exe"],
-            capture_output=True, timeout=5,
-        )
-    except Exception:
-        pass
-    time.sleep(1)  # wait for WinDivert driver to unload
+        time.sleep(1)  # wait for WinDivert driver to unload
 
 
 def _quick_connectivity_check(hosts: list[str], timeout: int = 5) -> dict[str, bool]:
@@ -675,7 +683,10 @@ def _curl_check_one(host: str, timeout: int = 5) -> dict:
         except (ValueError, IndexError):
             pass
 
-        # HTTP success code + (clean exit OR timeout) = page reached
+        # HTTP success code + (clean exit OR timeout with partial response) = page reached.
+        # returncode 28 = curl --max-time exceeded, but if http_code is valid (200, 301, etc.)
+        # it means the TLS handshake + HTTP response header arrived (DPI didn't block it),
+        # just the body download was slow. For DPI bypass testing this IS success.
         success = http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28)
 
         # Classify error
@@ -1964,13 +1975,18 @@ def main():
     # ─── Shutdown ─────────────────────────────────────────────────────
     print()
     print("  Shutting down...")
-    _stop_permanent_zapret(_active_process)
-    _active_process = None
+    try:
+        _stop_permanent_zapret(_active_process)
+        _active_process = None
 
-    stats = analytics.get_stats_summary()
-    print(f"  Strategies tested: {stats['total_strategies']}")
-    print(f"  Avg fitness:       {stats['avg_fitness']:.3f}")
-    analytics.close()
+        stats = analytics.get_stats_summary()
+        print(f"  Strategies tested: {stats['total_strategies']}")
+        print(f"  Avg fitness:       {stats['avg_fitness']:.3f}")
+    except Exception as _sd_exc:
+        logger.error("Shutdown stats error: %s", _sd_exc)
+    finally:
+        analytics.close()
+        # router.shutdown() is called via atexit (line ~973)
     print("  Done.")
     print()
 

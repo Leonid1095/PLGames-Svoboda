@@ -70,7 +70,17 @@ class HostSolver:
         self._ai_feedback = ai_feedback
         self._sync = server_sync
         self._strategies: dict[str, HostStrategy] = {}
+        self._byedpi = None  # Track running ByeDPI instance for cleanup
         self._load()
+
+    def shutdown(self) -> None:
+        """Stop running ByeDPI process if any."""
+        if self._byedpi:
+            try:
+                self._byedpi.stop()
+            except Exception:
+                pass
+            self._byedpi = None
 
     def get(self, host: str) -> Optional[HostStrategy]:
         """Get cached per-host strategy."""
@@ -217,7 +227,13 @@ class HostSolver:
                         )
                         self._strategies[host] = hs
                         self._save()
-                        # Don't stop ByeDPI — keep running for this host
+                        # Stop previous ByeDPI if any, keep reference for cleanup
+                        if self._byedpi:
+                            try:
+                                self._byedpi.stop()
+                            except Exception:
+                                pass
+                        self._byedpi = bdpi
                         return hs
                     bdpi.stop()
         except Exception as exc:
