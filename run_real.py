@@ -403,6 +403,15 @@ def _start_permanent_zapret(
         _safe_flags = ["multidisorder:pos=1,midsld:seqovl=681"]
 
     # ══════════════════════════════════════════════════════════════
+    # PER-HOST OVERRIDES (must be FIRST — first matching profile wins)
+    # Per-host solver finds optimal strategy for individual domains.
+    # These must precede general profiles to take priority.
+    # ══════════════════════════════════════════════════════════════
+    if extra_profiles:
+        cmd.extend(extra_profiles)
+        extra_profiles = None  # consumed, don't append again at end
+
+    # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
     # Uses full found strategy including fake if present.
     # ══════════════════════════════════════════════════════════════

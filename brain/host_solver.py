@@ -243,6 +243,13 @@ class HostSolver:
         logger.warning("Could not solve %s after all levels", host)
         return None
 
+    # Known domain variants — when solving "youtube.com", also apply
+    # the solution to www.youtube.com, m.youtube.com etc.
+    _DOMAIN_VARIANTS = {
+        "youtube.com": "youtube.com,www.youtube.com,m.youtube.com,music.youtube.com",
+        "discord.com": "discord.com,discordapp.com,cdn.discordapp.com",
+    }
+
     def build_extra_profiles(self, lua_dir=None) -> list[str]:
         """Build extra winws2 --new profiles for per-host strategies.
 
@@ -253,10 +260,11 @@ class HostSolver:
         for host, hs in self._strategies.items():
             if time.time() - hs.tested_at > 86400:
                 continue  # expired
+            domains = self._DOMAIN_VARIANTS.get(host, host)
             extra.append("--new")
             extra.append("--filter-tcp=443")
             extra.append("--filter-l7=tls")
-            extra.append(f"--hostlist-domains={host}")
+            extra.append(f"--hostlist-domains={domains}")
             for call in hs.flags:
                 extra.append(f"--lua-desync={call}")
         return extra
