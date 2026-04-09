@@ -549,7 +549,12 @@ def _start_permanent_zapret(
         )
         time.sleep(2)
         if proc.poll() is not None:
-            stderr = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
+            # Process already exited — safe to read stderr (finite data)
+            try:
+                stderr_bytes, _ = proc.communicate(timeout=3)
+                stderr = stderr_bytes.decode(errors="replace") if stderr_bytes else ""
+            except Exception:
+                stderr = ""
             print(f"  [ERROR] winws2 exited immediately: {stderr[:300]}")
             log.error("Permanent winws2 crashed: %s", stderr[:500])
             return None

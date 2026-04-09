@@ -335,7 +335,10 @@ function FindProxyForURL(url, host) {{
                 lines.append(f"\n    Telegram: Settings → Advanced → Proxy → SOCKS5")
                 lines.append(f"      Server: {_hp.split(':')[0]}  Port: {_hp.split(':')[1] if ':' in _hp else '1080'}")
                 if _auth and ":" in _auth:
-                    lines.append(f"      Username: {_auth.split(':')[0]}  Password: {_auth.split(':')[1]}")
+                    _user = _auth.split(':')[0]
+                    _pass = _auth.split(':')[1]
+                    _masked = _pass[:2] + '*' * max(len(_pass) - 2, 0)
+                    lines.append(f"      Username: {_user}  Password: {_masked}")
 
         if plan.unroutable_hosts:
             lines.append(f"\n  [!] Cannot route (need VPN/proxy): {', '.join(plan.unroutable_hosts)}")

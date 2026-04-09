@@ -136,17 +136,21 @@ class TierManager:
 
         # 2. Owner fallback (before first sync delivers fresh creds)
         if self._is_owner():
-            return self._decode_embedded_proxy()
+            url = self._decode_embedded_proxy()
+            return url if url else None
 
         return None
 
     @staticmethod
     def _decode_embedded_proxy() -> str:
-        """Decode embedded proxy URL (owner bootstrap fallback)."""
-        _d = "ABlTCUNRW1xZQA5XBQwWBQpTBzADARldK0cuLT4VQCRSJBEBGUgbHhcXEhRfBlFJEhsBVUxfCg0aGFVYBFBS"
-        _k = b"sv0b0da"
-        raw = base64.b64decode(_d)
-        return bytes(b ^ _k[i % len(_k)] for i, b in enumerate(raw)).decode()
+        """Owner bootstrap fallback — proxy URL must come from server.
+
+        Hardcoded credentials were removed for security.
+        Owner should wait for first server sync to receive proxy URL.
+        """
+        logger.warning("Embedded proxy fallback called but removed for security. "
+                        "Proxy URL will be delivered on next server sync.")
+        return ""
 
     def _is_owner(self) -> bool:
         """Check if this is the product owner's install (always PRO features)."""
