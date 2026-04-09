@@ -351,7 +351,8 @@ def _start_permanent_zapret(
     # YouTube video: all domains that serve video streams or YouTube API
     # (from OWX-FIX list-google.txt + own testing)
     _yt_video_domains = (
-        "googlevideo.com,youtube.com,youtu.be,youtube-nocookie.com,"
+        "googlevideo.com,youtube.com,www.youtube.com,m.youtube.com,"
+        "youtu.be,youtube-nocookie.com,"
         "youtubei.googleapis.com,youtube-ui.l.google.com,"
         "wide-youtube.l.google.com,yt-video-upload.l.google.com"
     )
