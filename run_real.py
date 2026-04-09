@@ -852,13 +852,20 @@ def main():
         )
         if _early_process:
             _active_process = _early_process
-            # Quick-validate: 1 curl to youtube (8s max)
+            # Multi-host validation: test diverse hosts (not just 1)
+            # Prevents: YouTube works but Discord blocked → false "early_validated"
             time.sleep(2)  # let WinDivert load
-            _validate_host = config.get("test_hosts", ["youtube.com"])[0]
-            _vr = _curl_check_one(_validate_host, timeout=6)
-            if _vr["success"]:
+            _validate_hosts = config.get("test_hosts", ["youtube.com"])[:3]
+            _validate_ok = 0
+            _validate_total = len(_validate_hosts)
+            for _vh in _validate_hosts:
+                _vr = _curl_check_one(_vh, timeout=6)
+                if _vr["success"]:
+                    _validate_ok += 1
+            # Require majority of hosts to pass (e.g. 2/3 or 1/1)
+            if _validate_ok >= max(1, (_validate_total + 1) // 2):
                 _early_validated = True
-                ui.ok(f"DPI bypass active (cached strategy works)")
+                ui.ok(f"DPI bypass active (cached strategy, {_validate_ok}/{_validate_total} hosts OK)")
                 _restart_stuck_apps()
             else:
                 # Stale strategy — kill immediately so apps don't cache failures
@@ -878,8 +885,9 @@ def main():
                     if not _fb_proc:
                         continue
                     time.sleep(2)
-                    _fb_vr = _curl_check_one(_validate_host, timeout=6)
-                    if _fb_vr["success"]:
+                    # Multi-host fallback validation
+                    _fb_ok = sum(1 for _vh in _validate_hosts if _curl_check_one(_vh, timeout=6)["success"])
+                    if _fb_ok >= max(1, (_validate_total + 1) // 2):
                         _active_process = _fb_proc
                         _early_validated = True
                         _fb_found = True
@@ -1088,7 +1096,11 @@ def main():
         """
         global _active_process
 
-        _wd_interval = config.get("watchdog_interval_minutes", 5) * 60
+        _wd_base_interval = config.get("watchdog_interval_minutes", 5) * 60
+        _wd_interval = _wd_base_interval
+        _wd_min_interval = 60   # 1 min minimum (after recent failure)
+        _wd_max_interval = 600  # 10 min maximum (when stable)
+        _wd_consecutive_ok = 0  # track consecutive healthy checks for adaptive interval
         _wd_fail_thr = config.get("watchdog_fail_threshold", 2)
         _wd_min_fit = config.get("watchdog_min_fitness", 0.6)
         _wd_ga_cfg = GAConfig.from_config(config)
@@ -1164,6 +1176,20 @@ def main():
             degraded = health.get("degraded", [])
             print(f"  [{now}] {' | '.join(status_parts)}  (health={overall:.0%})")
 
+            # ── Adaptive watchdog interval ────────────────────────────
+            # Shorter checks after failures (catch DPI changes fast),
+            # longer intervals when stable (reduce CPU/network usage)
+            if degraded or overall < _wd_min_fit:
+                _wd_consecutive_ok = 0
+                _wd_interval = _wd_min_interval  # 1 min — quick re-check after recovery
+            else:
+                _wd_consecutive_ok += 1
+                if _wd_consecutive_ok >= 3:
+                    # Gradually increase interval (stable for 3+ checks)
+                    _wd_interval = min(_wd_interval + 60, _wd_max_interval)
+                else:
+                    _wd_interval = _wd_base_interval
+
             # ── Discovery: new blocked domains ────────────────────────
             if _auto_path and _auto_path.exists() and _discovery:
                 try:
@@ -1231,7 +1257,11 @@ def main():
                 solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
                 solved = False
                 try:
-                    for fh in pfails[:2]:
+                    # Process ALL failed hosts (not just 2) — each may need
+                    # a different per-host strategy to fully restore connectivity
+                    for fh in pfails:
+                        if not _running:
+                            break
                         if solver.get(fh):
                             ui.info(f"{fh}: already solved")
                             continue
@@ -1812,6 +1842,29 @@ def main():
         print(f"       {enum_result.get('desc', '')}")
         ai_feedback.record_test(best_flags, best_fitness, "ok")
 
+        # Refinement: if first-found fitness is mediocre, try more strategies
+        # to find a better one (adaptive — skip if already excellent)
+        if best_fitness < 0.85 and _running:
+            print("  Refining: testing a few more strategies for better fitness...")
+            _refine_count = 0
+            _refine_idx = enumerator.strategies.index(
+                next(s for s in enumerator.strategies if s["name"] == enum_result["name"])
+            ) + 1
+            for _rs in enumerator.strategies[_refine_idx:_refine_idx + 5]:
+                if not _running:
+                    break
+                _rf = tester.test_strategy(_rs["flags"])
+                ai_feedback.record_test(_rs["flags"], _rf, "ok" if _rf > 0.3 else "timeout")
+                _refine_count += 1
+                if _rf > best_fitness + 0.05:
+                    best_flags = _rs["flags"]
+                    best_fitness = _rf
+                    print(f"  [OK] Better: {_rs['name']} (fitness={best_fitness:.3f})")
+                if best_fitness >= 0.85:
+                    break
+            if _refine_count > 0:
+                logger.info("Refinement: tested %d more, best fitness=%.3f", _refine_count, best_fitness)
+
         # Save and apply
         record = manager.save_strategy(best_flags, best_fitness, isp_name)
         analytics.log_strategy(
@@ -2121,6 +2174,14 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
         # It passes single-shot tests (fast response) but degrades to 8s
         # under sustained traffic. Let enumerator try it as fallback only.
     ]
+
+    # If TSPU profiler couldn't measure exact hop distance, prioritize autottl
+    # strategies (they calibrate dynamically from server responses)
+    if tspu_profile and tspu_profile.autottl_preferred:
+        autottl_seeds = [s for s in seeds if any("autottl" in f for f in s)]
+        other_seeds = [s for s in seeds if not any("autottl" in f for f in s)]
+        seeds = autottl_seeds + other_seeds
+        logger.info("TSPU TTL uncertain — prioritizing autottl strategies")
 
     # ISP-specific seeds
     if isp_name in ISP_SEED_STRATEGIES:

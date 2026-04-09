@@ -622,7 +622,11 @@ class ConnectionTester:
     # ─── Extended tests: HTTP/2 stream + WebSocket ──────────────────────────
 
     def _curl_test_h2_stream(self, host: str, timeout_override: int = 0) -> HostTestResult:
-        """Test HTTP/2 stream — download 64KB to detect strategies that break after handshake."""
+        """Test HTTP/2 stream — download 64KB to detect strategies that break after handshake.
+
+        Also detects bandwidth throttling: if 64KB takes > throttle_ms, TSPU is
+        likely throttling the stream even though the handshake succeeded.
+        """
         timeout = timeout_override or 8
         try:
             result = subprocess.run(
@@ -633,16 +637,24 @@ class ConnectionTester:
                     "-r", "0-65535",
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
-                    "-w", "%{http_code}|%{time_total}",
+                    "-w", "%{http_code}|%{time_total}|%{speed_download}",
                 ],
                 capture_output=True, text=True, timeout=timeout + 3,
             )
             parts = result.stdout.strip().split("|")
             http_code = int(parts[0]) if parts else 0
             latency_ms = round(float(parts[1]) * 1000, 1) if len(parts) > 1 else 0.0
+            speed_bps = float(parts[2]) if len(parts) > 2 else 0.0
 
             if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
-                return HostTestResult(host=f"h2:{host}", success=True, http_code=http_code, latency_ms=latency_ms)
+                # Detect bandwidth throttling: 64KB at < 8 KB/s = clearly throttled
+                throttle_ms = getattr(self, "_throttle_ms", 3000)
+                is_throttled = latency_ms > throttle_ms or (speed_bps > 0 and speed_bps < 8192)
+                error_type = "throttled" if is_throttled else ""
+                if is_throttled:
+                    logger.debug("H2 stream %s: throttled (%.0fms, %.0f B/s)", host, latency_ms, speed_bps)
+                return HostTestResult(host=f"h2:{host}", success=True, http_code=http_code,
+                                      latency_ms=latency_ms, error_type=error_type)
 
             error_type = self._classify_curl_error(result.returncode)
             return HostTestResult(host=f"h2:{host}", success=False, http_code=http_code, latency_ms=latency_ms, error_type=error_type)

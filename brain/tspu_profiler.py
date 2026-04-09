@@ -39,6 +39,7 @@ class TSPUProfile:
     dpi_type: str = "unknown"                # ektako_v2, signaltek, generic
     isp: str = "unknown"
     asn: str = ""
+    autottl_preferred: bool = False          # True when distance is estimated, not measured
 
     # Evidence
     evidence: list[str] = field(default_factory=list)
@@ -74,8 +75,15 @@ class TSPUProfiler:
         self._estimate_dpi_distance(prof)
 
         # Step 4: Recommend TTL
+        # Use autottl when possible (dynamically calibrates from server responses).
+        # Fixed TTL is fallback when autottl unavailable or unreliable.
         if prof.dpi_hop_distance:
             prof.recommended_ttl = max(1, prof.dpi_hop_distance - 1)
+            # Mark if distance was estimated (not measured) — callers should
+            # prefer autottl strategies when distance is uncertain
+            if not prof.server_hop_distance:
+                prof.autottl_preferred = True
+                prof.evidence.append("TTL based on heuristic — autottl preferred")
             prof.evidence.append(f"Recommended fake TTL: {prof.recommended_ttl}")
 
         # Step 5: Classify DPI type
