@@ -159,6 +159,21 @@ class ISPProfiler:
         self.profile: Optional[ISPProfile] = None
         self._load_profile()
 
+    def get_external_ip(self) -> str:
+        """Quick external IP check (for network change detection)."""
+        return self._get_external_ip()
+
+    def get_cached_ip(self) -> str:
+        """Get last known IP from cached profile."""
+        if self.profile:
+            return self.profile.external_ip
+        return ""
+
+    def detect_isp(self) -> str:
+        """Quick ISP re-detection (force refresh)."""
+        prof = self.detect(force=True)
+        return prof.isp_name if prof else ""
+
     def detect(self, force: bool = False) -> ISPProfile:
         """Full ISP and network profile detection cycle."""
         if not force and self.profile and not self._is_stale():

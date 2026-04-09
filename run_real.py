@@ -1094,7 +1094,7 @@ def main():
           6. Per-host solver
         Also monitors hostlist-auto for newly blocked domains (discovery).
         """
-        global _active_process
+        global _active_process, _tspu_recommended_ttl
 
         _wd_base_interval = config.get("watchdog_interval_minutes", 5) * 60
         _wd_interval = _wd_base_interval
@@ -1147,6 +1147,13 @@ def main():
             except Exception:
                 pass
 
+        # Track external IP for network change detection
+        _last_known_ip = ""
+        try:
+            _last_known_ip = profiler.get_cached_ip() or ""
+        except Exception:
+            pass
+
         while _running:
             for _ in range(_wd_interval):
                 if not _running:
@@ -1154,6 +1161,35 @@ def main():
                 time.sleep(1)
             if not _running:
                 break
+
+            # ── Network change detection ─────────────────────────────
+            # If external IP changed (WiFi→mobile, VPN on/off, ISP switch),
+            # re-profile TSPU and invalidate cached strategy.
+            try:
+                _current_ip = profiler.get_external_ip() or ""
+                if _last_known_ip and _current_ip and _current_ip != _last_known_ip:
+                    print(f"  [!] Network change detected ({_last_known_ip[:8]}.. → {_current_ip[:8]}..)")
+                    logger.warning("Network changed: %s → %s", _last_known_ip, _current_ip)
+                    _last_known_ip = _current_ip
+                    # Re-detect ISP and re-profile TSPU
+                    try:
+                        new_isp = profiler.detect_isp()
+                        if new_isp and new_isp != isp_name:
+                            print(f"  [!] New ISP: {new_isp} (was {isp_name})")
+                        from brain.tspu_profiler import TSPUProfiler as _TSPU_WD
+                        _wd_tspu = _TSPU_WD(timeout=5)
+                        _new_prof = _wd_tspu.profile(hosts[0], isp=new_isp or isp_name)
+                        if _new_prof.recommended_ttl:
+                            _tspu_recommended_ttl = _new_prof.recommended_ttl
+                            logger.info("Updated TSPU TTL: %d", _tspu_recommended_ttl)
+                    except Exception as _nce:
+                        logger.debug("Network re-profile failed: %s", _nce)
+                    # Force immediate health check (don't wait for interval)
+                    _wd_interval = _wd_min_interval
+                elif _current_ip:
+                    _last_known_ip = _current_ip
+            except Exception:
+                pass
 
             # ── Health check ──────────────────────────────────────────
             now = datetime.now().strftime("%H:%M")
@@ -1217,6 +1253,10 @@ def main():
                                 _tspu_recommended_ttl, config,
                                 extra_profiles=d_extra or _wd_extra,
                             )
+                            # Flush DNS + restart stuck apps so browser retries
+                            # discovered domains immediately (not cached failures)
+                            _flush_dns_cache()
+                            _restart_stuck_apps()
                     _known_auto = cur_auto
                 except Exception as exc:
                     logger.debug("Discovery check: %s", exc)
@@ -2220,7 +2260,11 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=No
     ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded,
                       dpi_type=dpi_type, country="ru")
 
+    _interim_applied = [False]  # mutable for closure access
+    _interim_fitness = [0.0]
+
     def on_gen(gen, best):
+        global _active_process
         if not _running:
             return
         from brain.ui import gen_line
@@ -2232,6 +2276,22 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=No
             best_flags=best.flags, population_size=len(ga.population),
             isp=isp_name,
         )
+
+        # Interim apply: if GA found a usable strategy (>0.3) and nothing is
+        # running yet, apply it immediately so user has partial bypass while
+        # GA continues searching for better. Prevents 15-min total blackout.
+        if (best.fitness > 0.3 and best.fitness > _interim_fitness[0] + 0.1
+                and not _interim_applied[0]):
+            _interim_applied[0] = True
+            _interim_fitness[0] = best.fitness
+            logger.info("Interim apply: fitness=%.3f at gen %d", best.fitness, gen)
+            print(f"  [interim] Applying partial bypass (fitness={best.fitness:.3f})...")
+            _active_process = _start_permanent_zapret(
+                zapret_bin, lua_dir, best.flags, hostlist,
+                _tspu_recommended_ttl, config,
+            )
+            if _active_process:
+                _flush_dns_cache()
 
     ga.set_generation_callback(on_gen)
     best = ga.evolve(tester.test_strategy)
