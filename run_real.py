@@ -403,15 +403,6 @@ def _start_permanent_zapret(
         _safe_flags = ["multidisorder:pos=1,midsld:seqovl=681"]
 
     # ══════════════════════════════════════════════════════════════
-    # PER-HOST OVERRIDES (must be FIRST — first matching profile wins)
-    # Per-host solver finds optimal strategy for individual domains.
-    # These must precede general profiles to take priority.
-    # ══════════════════════════════════════════════════════════════
-    if extra_profiles:
-        cmd.extend(extra_profiles)
-        extra_profiles = None  # consumed, don't append again at end
-
-    # ══════════════════════════════════════════════════════════════
     # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
     # Uses full found strategy including fake if present.
     # ══════════════════════════════════════════════════════════════
@@ -428,6 +419,16 @@ def _start_permanent_zapret(
     morphed_flags = morpher.morph_strategy(flags)
     for call in morphed_flags:
         cmd.append(f"--lua-desync={call}")
+
+    # ══════════════════════════════════════════════════════════════
+    # PER-HOST OVERRIDES — inserted here, after Profile 1 (section 0)
+    # but before Profile 2a (section 1). Each extra profile starts
+    # with --new so it creates its own section. Since zapret2 uses
+    # first-match, per-host overrides take priority over Profile 2a.
+    # ══════════════════════════════════════════════════════════════
+    if extra_profiles:
+        cmd.extend(extra_profiles)
+        extra_profiles = None  # consumed, don't append again at end
 
     # ══════════════════════════════════════════════════════════════
     # PROFILE 2a: TLS for YouTube video (googlevideo, youtube.com)
@@ -1453,6 +1454,8 @@ def main():
                     gb = _run_evolution(
                         tester, _wd_ga_cfg, seeds, analytics, isp_name,
                         ai_feedback=ai_feedback, dpi_type=dpi_type,
+                        zapret_bin=zapret_bin, lua_dir=lua_dir,
+                        hostlist=hostlist, config=config,
                     )
                     if gb and gb.fitness > 0.1:
                         rec = manager.save_strategy(gb.flags, gb.fitness, isp_name)
@@ -1992,7 +1995,8 @@ def main():
         ga_config.population_size = min(ga_config.population_size, 10)
         fitness_threshold = config.get("fitness_apply_threshold", 0.7)
 
-        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type)
+        best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type,
+                              zapret_bin=zapret_bin, lua_dir=lua_dir, hostlist=hostlist, config=config)
 
     if not best or best.fitness < 0.1:
         print()
@@ -2178,7 +2182,8 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                 if not best_flags:
                     print("  Running GA evolution (last resort)...")
                     seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
-                    best_result = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type)
+                    best_result = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type,
+                                                zapret_bin=zapret_bin, lua_dir=lua_dir, hostlist=hostlist, config=config)
                     if best_result and best_result.fitness > 0.1:
                         best_flags = best_result.flags
                         best_fitness = best_result.fitness
@@ -2256,7 +2261,8 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
 
 
 def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=None,
-                   dpi_type: str = "tspu") -> Optional:
+                   dpi_type: str = "tspu",
+                   zapret_bin=None, lua_dir=None, hostlist=None, config=None) -> Optional:
     """Run one GA evolution cycle with real testing."""
     from brain.genetic import StrategyGene, Individual
 
