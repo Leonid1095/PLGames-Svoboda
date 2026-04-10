@@ -340,199 +340,36 @@ def _start_permanent_zapret(
             print(f"  [!] Hostlist copy failed: {exc} (running without hostlist)")
 
     # Recommended fake TTL from TSPU profiler
-    # IMPORTANT: DPI may be at hop 3, but CDN edge servers (ytimg, ggpht) are
-    # often at hop 5-8. Using TTL=2 kills fakes before DPI AND real packets
-    # get corrupted on CDN routes. Minimum TTL=3, default=4.
     quic_ttl = max(tspu_ttl, 3) if tspu_ttl and tspu_ttl > 0 else 4
-
-    # ══════════════════════════════════════════════════════════════
-    # Domains that need special handling (excluded from aggressive desync)
-    # ══════════════════════════════════════════════════════════════
-    # YouTube video: all domains that serve video streams or YouTube API
-    # (from OWX-FIX list-google.txt + own testing)
-    _yt_video_domains = (
-        "googlevideo.com,youtube.com,www.youtube.com,m.youtube.com,"
-        "youtu.be,youtube-nocookie.com,"
-        "youtubei.googleapis.com,youtube-ui.l.google.com,"
-        "wide-youtube.l.google.com,yt-video-upload.l.google.com"
-    )
-    # YouTube images: CDN for thumbnails/avatars (NO aggressive desync)
-    _yt_image_domains = "ytimg.com,ytimg.l.google.com,ggpht.com,googleusercontent.com,jnn-pa.googleapis.com"
-    _yt_cdn_domains = f"{_yt_video_domains},{_yt_image_domains}"
-    # Discord: all subdomains (from OWX-FIX list-general.txt)
-    _discord_domains = (
-        "discord.com,discordapp.com,discordapp.net,discord.gg,"
-        "discord.media,discordcdn.com,discord.app,discord.dev,"
-        "gateway.discord.gg,updates.discord.com"
-    )
-    # Critical services that must NEVER be desync'd (breaks Claude Code, Steam, etc.)
-    _never_desync = "anthropic.com,claude.ai,openai.com,cursor.sh,github.com,githubusercontent.com,steam.com,steampowered.com,steamstatic.com,microsoft.com,visualstudio.com"
-    _gentle_exclude = f"{_yt_cdn_domains},{_discord_domains},{_never_desync}"
-    if _streamer_mode:
-        _gentle_exclude += (
-            ",live.twitch.tv,video-edge.abs.hls.ttvnw.net,usher.ttvnw.net"
-            ",ingest.twitch.tv,video-weaver.twitch.tv"
-            ",upload.youtube.com,obsproject.com"
-            ",live-api-s.facebook.com,edgevideo.svc.7sn.net"
-            ",akamaihd.net,cloudfront.net"
-        )
-
-    # SNI proxy: winws2 desync MUST be applied to SNI proxy traffic.
-    # The combo works: winws2 hides SNI from TSPU, SNI proxy reads full SNI and routes.
-    # Do NOT use --ipset-exclude-ip — that breaks video/CDN through SNI proxy.
     _sni_ip = None  # intentionally disabled
 
     # ══════════════════════════════════════════════════════════════
     # ADAPTIVE PROFILES: use the FOUND strategy everywhere.
-    #
-    # Old approach: hardcode different strategies per profile.
-    # Problem: enumerator finds working strategy, but only Profile 1
-    # uses it. YouTube/Discord profiles had their own (broken) strategies.
-    #
-    # New approach: the found strategy (`flags`) IS the bypass.
-    # All profiles use it. For CDN-sensitive profiles (images), we
-    # strip fake/fakedsplit (corrupts close CDN) but keep everything else.
+    # ══════════════════════════════════════════════════════════════
+    # SIMPLE CONFIG: one strategy for all TLS+HTTP, like regular zapret.
+    # Multi-profile approach caused winws2 crashes. Simple = works.
     # ══════════════════════════════════════════════════════════════
 
-    # Build CDN-safe version of strategy: remove fake packets that
-    # corrupt connections to close CDN servers (5-8 hops).
-    _cdn_unsafe_funcs = ("fake:", "fakedsplit:")
-    _safe_flags = [f for f in flags if not any(f.startswith(u) for u in _cdn_unsafe_funcs)]
-    if not _safe_flags:
-        # If strategy was ONLY fake-based, fall back to proven safe default
-        _safe_flags = ["multidisorder:pos=1,midsld:seqovl=681"]
-
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 1: TLS (general — all HTTPS except YouTube/Discord)
-    # Uses full found strategy including fake if present.
-    # ══════════════════════════════════════════════════════════════
-    cmd.extend([
-        "--filter-tcp=443",
-        "--filter-l7=tls",
-        f"--hostlist-exclude-domains={_gentle_exclude}",
-    ])
-    if _sni_ip:
-        cmd.append(f"--ipset-exclude-ip={_sni_ip}")
-    morph_calls = morpher.get_permanent_calls()
-    for mc in morph_calls:
-        cmd.append(f"--lua-desync={mc}")
-    morphed_flags = morpher.morph_strategy(flags)
-    for call in morphed_flags:
-        cmd.append(f"--lua-desync={call}")
-
-    # ══════════════════════════════════════════════════════════════
-    # PER-HOST OVERRIDES — inserted here, after Profile 1 (section 0)
-    # but before Profile 2a (section 1). Each extra profile starts
-    # with --new so it creates its own section. Since zapret2 uses
-    # first-match, per-host overrides take priority over Profile 2a.
-    # ══════════════════════════════════════════════════════════════
+    # Per-host overrides FIRST (if any) — first match wins in zapret2
     if extra_profiles:
         cmd.extend(extra_profiles)
-        extra_profiles = None  # consumed, don't append again at end
 
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 2a: TLS for YouTube video (googlevideo, youtube.com)
-    # Uses FOUND strategy — same as general. If AI/enumerator found
-    # it works for youtube.com, it works for googlevideo.com too.
-    # ══════════════════════════════════════════════════════════════
-    cmd.extend([
-        "--new",
-        "--filter-tcp=443",
-        "--filter-l7=tls",
-        f"--hostlist-domains={_yt_video_domains}",
-    ])
+    # PROFILE 1: All TLS (port 443) — found strategy via hostlist
+    cmd.extend(["--filter-tcp=443", "--filter-l7=tls"])
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 2b: TLS for YouTube images (ytimg, ggpht)
-    # CDN-safe: no fake (CDN edge at 5-8 hops, fake corrupts them).
-    # Uses found strategy with fake stripped out.
-    # ══════════════════════════════════════════════════════════════
-    cmd.extend([
-        "--new",
-        "--filter-tcp=443",
-        "--filter-l7=tls",
-        f"--hostlist-domains={_yt_image_domains}",
-    ])
-    for call in _safe_flags:
-        cmd.append(f"--lua-desync={call}")
-
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 3: TLS for Discord
-    # Uses FOUND strategy — same as general.
-    # ══════════════════════════════════════════════════════════════
-    cmd.extend([
-        "--new",
-        "--filter-tcp=443",
-        "--filter-l7=tls",
-        f"--hostlist-domains={_discord_domains}",
-    ])
+    # PROFILE 2: HTTP (port 80)
+    cmd.extend(["--new", "--filter-tcp=80", "--filter-l7=http"])
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 4: HTTP (port 80)
-    # ══════════════════════════════════════════════════════════════
+    # PROFILE 3: QUIC (UDP 443)
     cmd.extend([
-        "--new",
-        "--filter-tcp=80",
-        "--filter-l7=http",
-    ])
-    for call in flags:
-        cmd.append(f"--lua-desync={call}")
-
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 5: Discord media (TCP ports 2053-8443)
-    # Streamer mode: skip — these ports add WinDivert overhead
-    # ══════════════════════════════════════════════════════════════
-    if not _streamer_mode:
-        cmd.extend([
-            "--new",
-            "--filter-tcp=2053,2083,2087,2096,8443",
-            "--filter-l7=tls",
-        ])
-        for call in flags:
-            cmd.append(f"--lua-desync={call}")
-
-        # ══════════════════════════════════════════════════════════════
-        # PROFILE 6: Discord voice (UDP 50000-50100)
-        # ══════════════════════════════════════════════════════════════
-        cmd.extend([
-            "--new",
-            "--filter-udp=50000-50100",
-            f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=12",
-        ])
-
-    # ══════════════════════════════════════════════════════════════
-    # PROFILE 6: QUIC (YouTube video + other UDP/443)
-    # fake with known TTL from TSPU profiler
-    # ══════════════════════════════════════════════════════════════
-    quic_profile = [
-        "--new",
-        "--filter-udp=443",
-        "--filter-l7=quic",
+        "--new", "--filter-udp=443", "--filter-l7=quic",
         "--payload=quic_initial",
         f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=11",
-    ]
-    # Add Telegram IP ranges if ipset file exists
-    tg_ipset = Path(cwd) / ".." / ".." / ".." / "telegram_ips.txt"
-    if not tg_ipset.exists():
-        tg_ipset = Path(config.get("_base_dir", ".")) / "telegram_ips.txt" if config else None
-    if tg_ipset and tg_ipset.exists():
-        try:
-            import shutil
-            dest = Path(cwd) / "telegram_ips.txt"
-            if not dest.exists():
-                shutil.copy2(tg_ipset, dest)
-            quic_profile.insert(1, "--ipset=telegram_ips.txt")
-        except Exception:
-            pass
-    cmd.extend(quic_profile)
-
-    # Add extra per-host profiles if any
-    if extra_profiles:
-        cmd.extend(extra_profiles)
+    ])
 
     # Kill any existing winws2 before starting new one (prevents dual-process conflicts)
     # This is critical for early-start → full-start replacement
