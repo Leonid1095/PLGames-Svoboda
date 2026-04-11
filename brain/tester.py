@@ -107,7 +107,7 @@ class ConnectionTester:
     def __init__(self, config: dict, mock: bool = True, hostlist_path: Optional[Path] = None):
         self.config = config
         self.mock = mock
-        self.hosts: list[str] = config.get("test_hosts", ["youtube.com", "discord.com", "cdn.discordapp.com"])
+        self.hosts: list[str] = config.get("test_hosts", ["youtube.com", "www.youtube.com", "discord.com", "cdn.discordapp.com"])
         self.hosts_h2: list[str] = config.get("test_hosts_h2", ["youtube.com"])
         self.hosts_ws: list[str] = config.get("test_hosts_websocket", ["gateway.discord.gg"])
         self.trials: int = config.get("test_trials", 3)
@@ -127,6 +127,7 @@ class ConnectionTester:
         self._hostlist_path = hostlist_path
         self._shadow_process: Optional[subprocess.Popen] = None
         self._last_report: Optional[StrategyTestReport] = None
+        self._follow_redirects: bool = False  # set True for thorough/watchdog tests
 
     def test_strategy(self, flags: list[str]) -> float:
         """Evaluate strategy. Returns fitness 0.0-1.0.
@@ -221,7 +222,7 @@ class ConnectionTester:
             consecutive_fails = 0
             for host in self.hosts:
                 for trial in range(trials):
-                    r = self._curl_test(host, timeout_override=timeout)
+                    r = self._curl_test(host, timeout_override=timeout, follow_redirects=self._follow_redirects)
                     all_results.append(r)
                     total_tests += 1
                     if r.success:
@@ -288,20 +289,27 @@ class ConnectionTester:
         return round(fitness, 3)
 
     def test_strategy_thorough(self, flags: list[str]) -> float:
-        """Full test with all trials — use after evolution to verify winner."""
+        """Full test with all trials + redirect following — use after evolution to verify winner.
+
+        Unlike test_strategy() which is fast (no -L, 1 trial), this does a browser-like
+        test: follows redirects, checks body size, uses full trial count.
+        """
         if self.mock:
             return self._test_mock(flags)
 
         # Save and restore evolution settings
         saved_trials = self._evo_trials
         saved_timeout = self._evo_timeout
+        saved_follow = self._follow_redirects
         self._evo_trials = self.trials  # full trials (3)
         self._evo_timeout = self.timeout  # full timeout (5s)
+        self._follow_redirects = True  # browser-like test
         try:
             return self._test_real(flags)
         finally:
             self._evo_trials = saved_trials
             self._evo_timeout = saved_timeout
+            self._follow_redirects = saved_follow
 
     @staticmethod
     def _compute_fitness(
@@ -529,29 +537,34 @@ class ConnectionTester:
     _CURL_DNS_CODES = {6}             # could not resolve host
     _CURL_SSL_CODES = {35, 51, 60}    # SSL errors
 
-    def _curl_test(self, host: str, timeout_override: int = 0) -> HostTestResult:
-        """Single curl test with latency measurement and error classification."""
+    def _curl_test(self, host: str, timeout_override: int = 0, follow_redirects: bool = False) -> HostTestResult:
+        """Single curl test with latency measurement and error classification.
+
+        Args:
+            follow_redirects: if True, uses -L to follow redirects (slower but
+                tests what browser actually sees). Used in thorough/watchdog tests.
+        """
         t = timeout_override or self.timeout
         try:
-            # -w format: "HTTP_CODE|TIME_TOTAL_MS"
-            result = subprocess.run(
-                [
-                    "curl", "-s",
-                    "--ssl-no-revoke",
-                    "--max-time", str(t),
-                    f"https://{host}",
-                    "-o", "NUL" if self._is_windows else "/dev/null",
-                    "-w", "%{http_code}|%{time_total}",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=t + 3,
-            )
+            cmd = [
+                "curl", "-s",
+                "--ssl-no-revoke",
+                "--max-time", str(t),
+                f"https://{host}",
+                "-o", "NUL" if self._is_windows else "/dev/null",
+                "-w", "%{http_code}|%{time_total}|%{size_download}",
+            ]
+            if follow_redirects:
+                cmd.insert(2, "-L")
+                cmd.insert(3, "--max-redirs")
+                cmd.insert(4, "3")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=t + 3)
 
-            # Parse "CODE|TIME" output
+            # Parse "CODE|TIME|SIZE" output
             parts = result.stdout.strip().split("|")
             http_code = 0
             latency_ms = 0.0
+            body_size = 0
             try:
                 http_code = int(parts[0])
             except (ValueError, IndexError):
@@ -560,12 +573,19 @@ class ConnectionTester:
                 latency_ms = round(float(parts[1]) * 1000, 1)  # seconds → ms
             except (ValueError, IndexError):
                 pass
+            try:
+                body_size = int(float(parts[2]))
+            except (ValueError, IndexError):
+                pass
 
-            # Success: clean exit + success code, OR success code + timeout
-            # If latency > throttle threshold, mark as throttled.
-            # Default 3000ms catches TSPU throttling (manifests at ~3-8s).
-            # Single-shot tests pass quickly; throttling shows under sustained load.
-            if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
+            # Success: valid HTTP code + real content (not TSPU block page)
+            # Block pages are typically <1KB; real YouTube/Discord >10KB
+            code_ok = http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28)
+            # For 200 responses with -L, verify body is real content
+            if follow_redirects and http_code == 200 and body_size < 512:
+                code_ok = False  # likely TSPU block page
+
+            if code_ok:
                 throttle_ms = getattr(self, "_throttle_ms", 3000)
                 is_throttled = latency_ms > throttle_ms
                 if is_throttled:

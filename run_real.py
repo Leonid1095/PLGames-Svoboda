@@ -379,6 +379,11 @@ def _start_permanent_zapret(
     # The firewall rule is removed on exit by _emergency_cleanup().
     if is_win:
         try:
+            # Delete first to prevent duplicate rules across restarts
+            subprocess.run([
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                "name=Svoboda Block QUIC",
+            ], capture_output=True, timeout=5)
             subprocess.run([
                 "netsh", "advfirewall", "firewall", "add", "rule",
                 "name=Svoboda Block QUIC", "dir=out", "action=block",
@@ -523,22 +528,33 @@ def _quick_connectivity_check(hosts: list[str], timeout: int = 5) -> dict[str, b
     return results
 
 
-def _curl_check_one(host: str, timeout: int = 5) -> dict:
-    """Curl test with latency + error classification. Returns detailed result."""
+def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) -> dict:
+    """Curl test — follows redirects, checks body size. Returns detailed result.
+
+    Unlike shadow tester (speed-optimized), this does a REAL browser-like check:
+    - Follows redirects (-L) so youtube.com→www.youtube.com is actually tested
+    - Checks body size to detect TSPU block pages (real pages >1KB)
+    """
     is_win = platform.system() == "Windows"
     _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
     try:
-        result = subprocess.run(
-            ["curl", "-s", "--ssl-no-revoke",
-             "--max-time", str(timeout),
-             f"https://{host}",
-             "-o", "NUL" if is_win else "/dev/null",
-             "-w", "%{http_code}|%{time_total}"],
-            capture_output=True, text=True, timeout=timeout + 3,
-        )
+        cmd = [
+            "curl", "-s", "--ssl-no-revoke",
+            "--max-time", str(timeout),
+            f"https://{host}",
+            "-o", "NUL" if is_win else "/dev/null",
+            "-w", "%{http_code}|%{time_total}|%{size_download}",
+        ]
+        if follow_redirects:
+            cmd.insert(2, "-L")
+            cmd.insert(3, "--max-redirs")
+            cmd.insert(4, "3")
+
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout + 3)
         parts = result.stdout.strip().split("|")
         http_code = 0
         latency_ms = 0.0
+        body_size = 0
         try:
             http_code = int(parts[0])
         except (ValueError, IndexError):
@@ -547,12 +563,20 @@ def _curl_check_one(host: str, timeout: int = 5) -> dict:
             latency_ms = round(float(parts[1]) * 1000, 1)
         except (ValueError, IndexError):
             pass
+        try:
+            body_size = int(float(parts[2]))
+        except (ValueError, IndexError):
+            pass
 
-        # HTTP success code + (clean exit OR timeout with partial response) = page reached.
-        # returncode 28 = curl --max-time exceeded, but if http_code is valid (200, 301, etc.)
-        # it means the TLS handshake + HTTP response header arrived (DPI didn't block it),
-        # just the body download was slow. For DPI bypass testing this IS success.
-        success = http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28)
+        # Success requires: valid HTTP code + actual content received
+        # A TSPU block page or empty response is NOT success
+        code_ok = http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28)
+        # For 200 responses, require actual body content (>512 bytes rules out block pages)
+        # For 301/302, body can be empty (redirect itself is the response)
+        if http_code in {200, 403} and body_size < 512:
+            code_ok = False  # likely a TSPU block page or failed download
+
+        success = code_ok
 
         # Classify error
         error_type = ""
@@ -565,17 +589,20 @@ def _curl_check_one(host: str, timeout: int = 5) -> dict:
                 error_type = "dns"
             elif result.returncode in {35, 51, 60}:
                 error_type = "ssl"
+            elif body_size < 512 and http_code in {200, 403}:
+                error_type = "blockpage"
             elif result.returncode != 0:
                 error_type = "error"
 
         return {
             "success": success, "http_code": http_code,
             "latency_ms": latency_ms, "error_type": error_type,
+            "body_size": body_size,
         }
     except subprocess.TimeoutExpired:
-        return {"success": False, "http_code": 0, "latency_ms": timeout * 1000, "error_type": "timeout"}
+        return {"success": False, "http_code": 0, "latency_ms": timeout * 1000, "error_type": "timeout", "body_size": 0}
     except Exception:
-        return {"success": False, "http_code": 0, "latency_ms": 0, "error_type": "error"}
+        return {"success": False, "http_code": 0, "latency_ms": 0, "error_type": "error", "body_size": 0}
 
 
 def main():
@@ -813,7 +840,7 @@ def main():
 
     from brain.block_classifier import BlockageClassifier
 
-    hosts = config.get("test_hosts", ["youtube.com", "discord.com", "cdn.discordapp.com"])
+    hosts = config.get("test_hosts", ["youtube.com", "www.youtube.com", "discord.com", "cdn.discordapp.com"])
     ui.step("Analyzing blocking methods...")
     classifier = BlockageClassifier(timeout=5)
     block_results = {}
