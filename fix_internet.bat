@@ -17,8 +17,13 @@ if %errorLevel% neq 0 (
     exit /b 0
 )
 
+:: 0. Remove QUIC firewall block
+echo  [0/8] Removing QUIC firewall block...
+netsh advfirewall firewall delete rule name="Svoboda Block QUIC" >nul 2>&1
+echo        Done
+
 :: 1. Kill winws2 + gost
-echo  [1/6] Killing winws2 and gost processes...
+echo  [1/8] Killing winws2 and gost processes...
 taskkill /F /IM winws2.exe >nul 2>&1
 if %errorLevel% equ 0 (
     echo        Killed winws2.exe

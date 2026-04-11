@@ -47,6 +47,15 @@ def _emergency_cleanup():
     gost tunnel lingering (port conflict on next run).
     """
     if platform.system() == "Windows":
+        # 0. Remove QUIC firewall block
+        try:
+            subprocess.run([
+                "netsh", "advfirewall", "firewall", "delete", "rule",
+                "name=Svoboda Block QUIC",
+            ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+
         # 1. Kill winws2 + gost
         for proc_name in ("winws2.exe", "gost.exe"):
             try:
@@ -364,12 +373,20 @@ def _start_permanent_zapret(
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # PROFILE 3: QUIC (UDP 443)
-    cmd.extend([
-        "--new", "--filter-udp=443", "--filter-l7=quic",
-        "--payload=quic_initial",
-        f"--lua-desync=fake:blob=fake_default_quic:ip_ttl={quic_ttl}:ip6_ttl={quic_ttl}:repeats=11",
-    ])
+    # QUIC: block via firewall instead of desync.
+    # TSPU detects and blocks all fake packets, so QUIC desync fails.
+    # Blocking UDP 443 forces browsers to use TCP 443 where our desync works.
+    # The firewall rule is removed on exit by _emergency_cleanup().
+    if is_win:
+        try:
+            subprocess.run([
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                "name=Svoboda Block QUIC", "dir=out", "action=block",
+                "protocol=UDP", "remoteport=443",
+            ], capture_output=True, timeout=5)
+            logger.info("QUIC blocked via firewall (forces TCP fallback)")
+        except Exception as exc:
+            logger.debug("Failed to block QUIC: %s", exc)
 
     # Kill any existing winws2 before starting new one (prevents dual-process conflicts)
     # This is critical for early-start → full-start replacement
