@@ -47,12 +47,23 @@ def _emergency_cleanup():
     gost tunnel lingering (port conflict on next run).
     """
     if platform.system() == "Windows":
-        # 0. Remove QUIC firewall block
+        # 0a. Remove QUIC firewall block
         try:
             subprocess.run([
                 "netsh", "advfirewall", "firewall", "delete", "rule",
                 "name=Svoboda Block QUIC",
             ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+        except Exception:
+            pass
+
+        # 0b. Restore CRL/OCSP certificate revocation check
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                0, winreg.KEY_ALL_ACCESS)
+            winreg.SetValueEx(key, "CertificateRevocation", 0, winreg.REG_DWORD, 1)
+            winreg.CloseKey(key)
         except Exception:
             pass
 
@@ -415,6 +426,27 @@ def _start_permanent_zapret(
             logger.info("QUIC blocked via firewall (forces TCP fallback)")
         except Exception as exc:
             logger.debug("Failed to block QUIC: %s", exc)
+
+        # Disable CRL/OCSP revocation check — DPI blocks lencr.org (Let's Encrypt
+        # CRL server) by IP. Without this, browsers refuse to connect to sites with
+        # Let's Encrypt certs (x.com, etc.) because they can't verify revocation.
+        # Restored on exit by _emergency_cleanup().
+        try:
+            import winreg
+            key = winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Internet Settings",
+                0, winreg.KEY_ALL_ACCESS)
+            winreg.SetValueEx(key, "CertificateRevocation", 0, winreg.REG_DWORD, 0)
+            winreg.CloseKey(key)
+            # Notify system of setting change
+            try:
+                import ctypes
+                ctypes.windll.wininet.InternetSetOptionW(0, 39, 0, 0)
+            except Exception:
+                pass
+            logger.info("CRL/OCSP revocation check disabled (DPI blocks CRL servers)")
+        except Exception as exc:
+            logger.debug("Failed to disable CRL check: %s", exc)
 
     # Kill any existing winws2 before starting new one (prevents dual-process conflicts)
     # This is critical for early-start → full-start replacement
