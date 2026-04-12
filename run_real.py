@@ -228,6 +228,29 @@ def _download_hostlist(base_dir: Path) -> Optional[Path]:
         except Exception as exc:
             print(f"  [!] {name} download failed: {exc}")
 
+    # Ensure CRL/OCSP domains are in hostlist (DPI blocks certificate
+    # revocation checks which makes browsers refuse valid TLS connections)
+    _crl_ocsp_domains = [
+        "lencr.org",            # Let's Encrypt OCSP/CRL
+        "ocsp.digicert.com", "crl3.digicert.com", "crl4.digicert.com",
+        "ocsp.sectigo.com", "ocsp.comodoca.com",
+        "ocsp.globalsign.com", "crl.globalsign.com",
+        "ocsp.pki.goog", "pki.goog",
+        "ocsp.r2m01.amazontrust.com", "crl.r2m01.amazontrust.com",
+    ]
+    if hostlist_path.exists():
+        try:
+            existing = hostlist_path.read_text(encoding="utf-8", errors="replace")
+            added = []
+            for d in _crl_ocsp_domains:
+                if d not in existing:
+                    added.append(d)
+            if added:
+                with open(hostlist_path, "a", encoding="utf-8") as f:
+                    f.write("\n" + "\n".join(added) + "\n")
+        except Exception:
+            pass
+
     # Fallback: write minimal list of known blocked domains
     if not hostlist_path.exists():
         minimal = [
@@ -238,7 +261,7 @@ def _download_hostlist(base_dir: Path) -> Optional[Path]:
             "facebook.com", "instagram.com", "whatsapp.com",
             "tiktok.com", "linkedin.com", "medium.com",
             "rutracker.org", "nnmclub.to",
-        ]
+        ] + _crl_ocsp_domains
         hostlist_path.write_text("\n".join(minimal) + "\n", encoding="utf-8")
         print(f"  [!] Using minimal built-in hostlist ({len(minimal)} domains)")
 
