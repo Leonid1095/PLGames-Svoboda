@@ -1101,6 +1101,53 @@ def main():
         except Exception:
             pass
 
+        # ─── winws2 health monitor ───────────────────────────────────────
+        # Detects a silent winws2 crash (WinDivert glitch, OOM, kill) and
+        # respawns within ~10s. Without this, the 5-min watchdog tick is
+        # the only recovery path → up to 5 minutes of total blackout per crash.
+        def _winws2_health_monitor():
+            global _active_process
+            backoff = 2
+            while _running:
+                # Short sleep loop so shutdown is responsive
+                for _ in range(10):
+                    if not _running:
+                        return
+                    time.sleep(1)
+                proc = _active_process
+                if proc is None:
+                    continue
+                if proc.poll() is None:
+                    backoff = 2  # healthy → reset
+                    continue
+                # Process has died
+                rc = proc.returncode
+                logger.critical("winws2 crashed (pid=%s rc=%s) — respawning",
+                                getattr(proc, "pid", "?"), rc)
+                _active_process = None
+                try:
+                    new_proc = _start_permanent_zapret(
+                        zapret_bin, lua_dir, _wd_flags, hostlist,
+                        _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
+                    )
+                    if new_proc:
+                        _active_process = new_proc
+                        logger.info("winws2 respawned (pid=%s)", new_proc.pid)
+                        backoff = 2
+                    else:
+                        logger.warning("winws2 respawn returned None; backing off %ds", backoff)
+                        time.sleep(backoff)
+                        backoff = min(backoff * 2, 60)
+                except Exception as exc:
+                    logger.warning("winws2 respawn error: %s (backoff %ds)", exc, backoff)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, 60)
+
+        _health_thread = threading.Thread(
+            target=_winws2_health_monitor, daemon=True, name="winws2-monitor",
+        )
+        _health_thread.start()
+
         while _running:
             for _ in range(_wd_interval):
                 if not _running:
@@ -1390,6 +1437,7 @@ def main():
                     gb = _run_evolution(
                         tester, _wd_ga_cfg, seeds, analytics, isp_name,
                         ai_feedback=ai_feedback, dpi_type=dpi_type,
+                        recommended_ttl=_tspu_recommended_ttl,
                         zapret_bin=zapret_bin, lua_dir=lua_dir,
                         hostlist=hostlist, config=config,
                     )
@@ -1932,6 +1980,7 @@ def main():
         fitness_threshold = config.get("fitness_apply_threshold", 0.7)
 
         best = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type,
+                              recommended_ttl=_tspu_recommended_ttl,
                               zapret_bin=zapret_bin, lua_dir=lua_dir, hostlist=hostlist, config=config)
 
     if not best or best.fitness < 0.1:
@@ -2119,6 +2168,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                     print("  Running GA evolution (last resort)...")
                     seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
                     best_result = _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=ai_feedback, dpi_type=dpi_type,
+                                                recommended_ttl=_tspu_recommended_ttl,
                                                 zapret_bin=zapret_bin, lua_dir=lua_dir, hostlist=hostlist, config=config)
                     if best_result and best_result.fitness > 0.1:
                         best_flags = best_result.flags
@@ -2197,7 +2247,7 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
 
 
 def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=None,
-                   dpi_type: str = "tspu",
+                   dpi_type: str = "tspu", recommended_ttl: Optional[int] = None,
                    zapret_bin=None, lua_dir=None, hostlist=None, config=None) -> Optional:
     """Run one GA evolution cycle with real testing."""
     from brain.genetic import StrategyGene, Individual
@@ -2210,7 +2260,8 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=No
     # Get excluded functions from AI feedback (if provided)
     _excluded = ai_feedback.get_excluded_functions() if ai_feedback else []
     ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded,
-                      dpi_type=dpi_type, country="ru")
+                      dpi_type=dpi_type, country="ru",
+                      recommended_ttl=recommended_ttl)
 
     _interim_applied = [False]  # mutable for closure access
     _interim_fitness = [0.0]

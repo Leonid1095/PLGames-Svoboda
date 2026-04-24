@@ -112,8 +112,13 @@ class ConnectionTester:
         self.hosts_ws: list[str] = config.get("test_hosts_websocket", ["gateway.discord.gg"])
         self.trials: int = config.get("test_trials", 3)
         self.timeout: int = config.get("test_timeout", 8)
-        self._evo_timeout: int = min(self.timeout, 6)  # shorter timeout during evolution
-        self._evo_trials: int = 1  # 1 trial per host during evolution (fast screening)
+        # Evolution timeout must be > TSPU throttle ceiling (~8s) so throttled
+        # responses show up as slow successes instead of aborted curls. Otherwise
+        # a throttled "pass" looks like a clean pass to GA fitness.
+        self._evo_timeout: int = max(10, min(self.timeout, 12))
+        # 3 trials per host in evolution: catches jitter, reduces GA false-positives
+        # where a throttled run happens to land under timeout once by luck.
+        self._evo_trials: int = 3
         # Throttle detection: threshold for marking a response as "throttled"
         # TSPU throttles to ~8s. 5s threshold avoids false positives on
         # just-slow servers (3-4s is normal for international CDNs from RU).

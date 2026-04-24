@@ -296,3 +296,60 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 - Fix: `_fail_tracker` dict — лимит 10k + периодическая очистка
 - Fix: DB connection leak — все пути обёрнуты в try-finally
 - Migration: автомиграция БД (колонка salt), обратная совместимость с legacy хешами
+
+---
+
+## Последние исправления (2026-04-24) — Autonomy audit & fixes
+
+### Глубокий аудит автономной работы
+Три параллельных аудита (discovery pipeline, fallback transports, orchestration) выявили:
+- **Discovery**: GA получал мусорный сигнал (1 trial, 6s timeout) — эволюционировал стратегии, которые проходят тест, но фейлят в реале (Discord throttled 8s засчитывался как pass)
+- **Fallbacks**: WARP installer блочит TSPU (`exit=28`), Telemost asyncio умирает через 10с + требует живого звонка, ECH неприменим (сайты не публикуют ключи). Работающих 24/7 fallback — **0**
+- **Orchestration**: watchdog-loop правильный, но без watcher на winws2-процесс — 5 мин blackout при падении
+
+### Реализованные фиксы
+
+**NaiveProxy — умный fallback-слой** (приоритет 1.5 между user_proxy и WARP)
+- Новый модуль: `brain/naive_proxy.py` (~290 строк)
+- Wired в `brain/proxy_router.py`: активируется ТОЛЬКО для IP-blocked/HTTP2_STREAM_KILL хостов через PAC. 99% трафика остаётся на zapret2 с нативной скоростью — не VPN, а targeted escalation.
+- Автоскачивание бинаря `naive.exe` с GitHub releases (~30 MB в `bin/`) с fallback на known version
+- Config: `naive_proxy_url` + `naive_proxy_socks_port` (default 1084, чтобы не конфликтовать с gost на 1082 / telemost на 1083)
+- Credentials — только в локальном `config.json` (в `.gitignore`)
+
+**GA fitness signal** (`brain/tester.py:113-120`)
+- `_evo_trials` 1 → 3 (ловит jitter, меньше ложных "прошло один раз повезло")
+- `_evo_timeout` 6s → 10s (TSPU throttle ~8s теперь виден в evo как медленный success, не aborted curl)
+- Результат: GA перестаёт плодить стратегии "работает в тесте, фейлит в жизни"
+
+**winws2 health monitor** (`run_real.py:1104` в `_unified_watchdog`)
+- Daemon-thread опрашивает `_active_process.poll()` каждые 10с
+- При крахе winws2 → автореспавн через `_start_permanent_zapret` с текущей стратегией
+- Exponential backoff 2s→60s если респавн не удаётся
+- Было: 5 мин blackout до следующего watchdog-тика. Стало: ~10с
+
+### Константы ограничения (для памяти)
+- **Telemost** нельзя ставить 24/7 fallback — требует активного звонка пользователя. Оставлен как break-glass (manual).
+- **WARP** мёртв на TSPU — installer блокируется на скачивании. Оставлен в цепочке последним (работает на не-TSPU ISP).
+- **ECH** неприменим для youtube/discord — сайты не публикуют ECH keys в DNS.
+
+### Cleanup веток
+Удалены заброшенные эксперименты конца марта:
+- `claude/elegant-mclaren` (точный дубликат `claude/awesome-feynman`)
+- `claude/elated-feynman` (содержала uncommitted SOCKS5→SOCKS PAC-fix, не перенесён)
+Оставлены: `main`, `claude/awesome-feynman` (4 коммита, не смержена — есть потенциально ценные фиксы Discord/YouTube).
+
+**Profile-aware TTL в GA** (`brain/genetic.py`)
+- `StrategyGene.__init__` принимает `recommended_ttl` (из TSPU-профайлера, обычно 2-5 для er-telecom/Rostelecom)
+- Новый хелпер `_pick_ttl(lo, hi)`: 70% мутаций в `[rec-1, rec+1]`, 20% в `[rec-2, rec+2]`, 10% полный диапазон
+- Все 5 точек генерации TTL переведены на хелпер: `fake/fakedsplit` (2 места), `pktmod`, `send`, `add_param mutation`, compound pattern `duplicate_tamper`
+- `run_real.py _run_evolution` принимает и пробрасывает `recommended_ttl=_tspu_recommended_ttl`
+- **Верификация**: smoke-тест 1000 итераций → 859 попаданий в `[rec-1..rec+1]` c recommended_ttl=3 vs 184 у рандома — **4.7× эффективнее**
+- Было: 93% мутаций TTL ≥ 6 никогда не достигали TSPU (middlebox на hop=3). Стало: GA концентрируется на реально рабочем окне.
+
+### Оставшиеся пункты аудита (приоритет)
+- [ ] **№4b Enumerator ISP-prioritization** — сортировать 62+ стратегий по рейтингу успеха для данной ISP (данные с сервера или локально накопленные)
+- [ ] **№5 Network change → force re-enum** — при смене IP сбрасывать `_wd_flags`, не только TTL
+- [ ] **№6 AI получает block classification + ISP profile** — сейчас только `isp + middlebox_type`, без HTTP2_STREAM_KILL / latency pattern
+- [ ] **№7 p95 latency check в watchdog** — ловить throttling до того как streak_fail сработает
+- [ ] Bonus: byedpi в escalation cascade (локальный SOCKS5, полностью авто)
+- [ ] Bonus: восстановить `svoboda_tray.py` из `awesome-feynman` (run.bat option [1] сейчас сломан в main)

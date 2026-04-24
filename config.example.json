@@ -40,6 +40,8 @@
   "morphing_enabled": true,
   "morphing_profile": "chrome_win",
   "user_proxy": "",
+  "naive_proxy_url": "",
+  "naive_proxy_socks_port": 1084,
   "telemost_room_id": "",
   "telemost_key": "",
   "telemost_socks_port": 1083

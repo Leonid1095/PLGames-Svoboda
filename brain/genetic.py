@@ -132,12 +132,18 @@ class StrategyGene:
 
     def __init__(self, config: GAConfig, seed_strategies: Optional[list[list[str]]] = None,
                  excluded_functions: Optional[set[str]] = None,
-                 dpi_type: str = "tspu", country: str = "ru"):
+                 dpi_type: str = "tspu", country: str = "ru",
+                 recommended_ttl: Optional[int] = None):
         self.config = config
         self.seed_strategies = seed_strategies or []
         self.excluded_functions = excluded_functions or set()
         self.dpi_type = dpi_type
         self.country = country
+        # Profile-aware TTL seeding: if TSPUProfiler determined the DPI hop
+        # distance (e.g. TSPU at hop=3), cluster random TTL mutations around
+        # this value ± 1. Without it, 93% of random ttl∈[3..15] never hit the
+        # narrow [3..5] window where fake packets actually reach the middlebox.
+        self.recommended_ttl: Optional[int] = recommended_ttl
         self.population: list[Individual] = []
         self.generation: int = 0
         self.best_ever: Optional[Individual] = None
@@ -318,7 +324,7 @@ class StrategyGene:
         elif pattern == "duplicate_tamper":
             # Send tampered copy + split: DPI processes tampered packet,
             # server receives real fragments
-            ttl = random.randint(1, 4)
+            ttl = self._pick_ttl(1, 4)
             return [
                 f"send:ip_ttl={ttl}",
                 self._random_desync_call(),
@@ -358,6 +364,24 @@ class StrategyGene:
             return f"{func}:{':'.join(params)}"
         return func
 
+    def _pick_ttl(self, lo: int, hi: int) -> int:
+        """Pick an IP TTL value, biased toward recommended_ttl when known.
+
+        TSPU sits at a fixed hop distance (profiler discovers this via TTL probe).
+        Fake packets must expire AT the middlebox — TTL off by >1 misses the window.
+        With recommended_ttl set, 70% of mutations cluster in [rec-1, rec+1],
+        20% stay close [rec-2, rec+2], 10% explore widely.
+        """
+        rec = self.recommended_ttl
+        if rec is None:
+            return random.randint(lo, hi)
+        r = random.random()
+        if r < 0.7:
+            return max(lo, min(hi, rec + random.randint(-1, 1)))
+        if r < 0.9:
+            return max(lo, min(hi, rec + random.randint(-2, 2)))
+        return random.randint(lo, hi)
+
     def _random_params_for(self, func: str) -> list[str]:
         """Generate random parameters appropriate for a function."""
         params: list[str] = []
@@ -372,7 +396,7 @@ class StrategyGene:
                 params.append(f"ip_autottl={autottl}")
                 params.append(f"ip6_autottl={autottl}")
             else:
-                ttl = random.randint(3, DESYNC_PARAMS["ip_ttl"][1])  # floor at 3
+                ttl = self._pick_ttl(3, DESYNC_PARAMS["ip_ttl"][1])
                 params.append(f"ip_ttl={ttl}")
                 params.append(f"ip6_ttl={ttl}")
             # fooling
@@ -406,7 +430,7 @@ class StrategyGene:
 
         elif func == "pktmod":
             if random.random() < 0.5:
-                ttl = random.randint(1, 3)
+                ttl = self._pick_ttl(1, 3)
                 params.append(f"ip_ttl={ttl}")
                 params.append(f"ip6_ttl={ttl}")
             if random.random() < 0.5:
@@ -426,7 +450,7 @@ class StrategyGene:
             if random.random() < 0.4:
                 params.append("ipfrag")
             if random.random() < 0.3:
-                ttl = random.randint(1, 5)
+                ttl = self._pick_ttl(1, 5)
                 params.append(f"ip_ttl={ttl}")
 
         elif func == "oob":
@@ -559,7 +583,7 @@ class StrategyGene:
             if random.random() < 0.5 and "tcp_md5" not in params:
                 params.append("tcp_md5")
             elif random.random() < 0.5:
-                ttl = random.randint(1, 15)
+                ttl = self._pick_ttl(1, 15)
                 # Replace existing ttl or add new
                 params = [p for p in params if not p.startswith("ip_ttl=")]
                 params.append(f"ip_ttl={ttl}")

@@ -30,7 +30,7 @@ class RouteDecision:
     """Routing decision for a blocked host."""
     host: str
     block_type: str
-    route: str          # "zapret2" | "warp" | "user_proxy" | "telemost" | "byedpi" | "unroutable"
+    route: str          # "zapret2" | "warp" | "user_proxy" | "naive" | "telemost" | "byedpi" | "unroutable"
     proxy_url: str = ""  # SOCKS5 URL if routed through proxy
     reason: str = ""
 
@@ -42,7 +42,7 @@ class RoutingPlan:
     proxy_hosts: list[str] = field(default_factory=list)
     unroutable_hosts: list[str] = field(default_factory=list)
     proxy_url: str = ""
-    proxy_type: str = ""  # "warp" | "user_proxy" | "byedpi" | ""
+    proxy_type: str = ""  # "warp" | "user_proxy" | "naive" | "byedpi" | ""
     decisions: list[RouteDecision] = field(default_factory=list)
 
 
@@ -76,7 +76,10 @@ class ProxyRouter:
         self._warp = None
         self._gost_tunnel = None
         self._telemost = None
+        self._naive = None
         self._user_proxy: str = config.get("user_proxy", "")
+        self._naive_url: str = config.get("naive_proxy_url", "")
+        self._naive_port: int = int(config.get("naive_proxy_socks_port", 1084))
         self._is_windows = platform.system() == "Windows"
 
     def plan_routing(self, block_results: dict) -> RoutingPlan:
@@ -126,8 +129,9 @@ class ProxyRouter:
         Priority:
         0. PLGames VPS proxy (PRO tier — included in subscription)
         1. User's VPS proxy (fastest, user controls)
-        2. Cloudflare WARP (free, autonomous)
-        3. ByeDPI (local, limited)
+        2. NaiveProxy (HTTPS-masquerading, most DPI-resistant)
+        3. Cloudflare WARP (free, autonomous — often blocked on TSPU)
+        4. Telemost WebRTC (manual, needs live call — break-glass only)
         """
         if not plan.proxy_hosts:
             return True  # nothing to proxy
@@ -163,7 +167,42 @@ class ProxyRouter:
             else:
                 logger.warning("User proxy %s failed, trying WARP...", self._user_proxy)
 
-        # 2. Try Cloudflare WARP (auto-install if not present)
+        # 2. NaiveProxy (HTTPS-masquerading proxy — most DPI-resistant)
+        if self._naive_url:
+            try:
+                from brain.naive_proxy import NaiveProxy
+                self._naive = NaiveProxy(self.config, self._naive_url, local_port=self._naive_port)
+                started = False
+                try:
+                    started = self._naive.start()
+                    if started:
+                        naive_local = self._naive.local_proxy_url
+                        test_host = plan.proxy_hosts[0]
+                        if self._test_proxy(naive_local, test_host):
+                            plan.proxy_url = naive_local
+                            plan.proxy_type = "naive"
+                            for d in plan.decisions:
+                                if d.route == "proxy":
+                                    d.proxy_url = naive_local
+                                    d.route = "naive"
+                            logger.info("NaiveProxy ready for %d IP-blocked hosts", len(plan.proxy_hosts))
+                            return True
+                        logger.warning("NaiveProxy up but can't reach %s", test_host)
+                    else:
+                        logger.warning("NaiveProxy failed to start")
+                except Exception as exc_inner:
+                    logger.debug("NaiveProxy test error: %s", exc_inner)
+                # Stop naive if we didn't return True
+                if started:
+                    self._naive.stop()
+                self._naive = None
+            except Exception as exc:
+                logger.debug("NaiveProxy setup error: %s", exc)
+                if self._naive:
+                    self._naive.stop()
+                    self._naive = None
+
+        # 3. Try Cloudflare WARP (auto-install if not present)
         try:
             from brain.warp import WarpManager
             self._warp = WarpManager()
@@ -515,6 +554,9 @@ function FindProxyForURL(url, host) {{
         if getattr(self, '_telemost', None):
             self._telemost.stop()
             self._telemost = None
+        if getattr(self, '_naive', None):
+            self._naive.stop()
+            self._naive = None
 
     # ─── Internal ─────────────────────────────────────────────────────
 
