@@ -346,6 +346,14 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 - **Верификация**: smoke-тест 1000 итераций → 859 попаданий в `[rec-1..rec+1]` c recommended_ttl=3 vs 184 у рандома — **4.7× эффективнее**
 - Было: 93% мутаций TTL ≥ 6 никогда не достигали TSPU (middlebox на hop=3). Стало: GA концентрируется на реально рабочем окне.
 
+**Block-type-aware dispatcher** (`brain/host_solver.py`, `brain/discovery.py`, `run_real.py`)
+- `BLOCK_TYPE_TAGS = {"HTTP2_STREAM_KILL": "h2_downgrade"}` — расширяемая таблица
+- `HostSolver.solve(block_type=...)` — стратегии с матчинг-тегом hoisted в начало кандидатов, остальные сохраняют исходный порядок как fallback
+- `discovery.py` пробрасывает `result.block_type` в solver
+- `run_real.py`: Step 1 классификации сохраняет `_wd_block_types[host]`, Step 6 per-host решает с этим контекстом; `_tool_per_host_solver` (AI engine path) тоже использует `blocked[host].block_type`
+- Эффект для Discord: вместо тестирования 8 Tier 0 nofake стратегий впустую → сразу 4 h2_downgrade. Экономия ~4 мин на recovery cycle.
+- Phase B (fake ClientHello injection) пропущена — zapret2 это уже умеет (`fake:blob=fake_default_tls`), но отключено по CLAUDE.md (TSPU блочит фейки)
+
 **Phase A: H2 downgrade primitive** (`lua/svoboda_h2_downgrade.lua`, `brain/enumerator.py`)
 - Новый custom lua-desync `alpn_strip` — модифицирует TLS ClientHello in-place, удаляя h2/h2c из ALPN extension. Сервер падает на HTTP/1.1, TSPU не убивает h2 stream (потому что его нет).
 - 4 новые стратегии в enumerator (Tier 0.5, между nofake и community):

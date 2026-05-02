@@ -169,7 +169,9 @@ class DiscoveryPipeline:
 
             if self._solver:
                 try:
-                    host_result = self._solver.solve(domain, isp=self._isp)
+                    host_result = self._solver.solve(
+                        domain, isp=self._isp, block_type=result.block_type,
+                    )
                     if host_result:
                         result.solved = True
                         result.strategy_flags = host_result.flags

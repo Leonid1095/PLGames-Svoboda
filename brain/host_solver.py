@@ -24,6 +24,16 @@ from typing import Optional
 logger = logging.getLogger("svoboda.host_solver")
 
 
+# Map block_type from BlockageClassifier to strategy tag in enumerator.
+# When a host is classified, matching-tag strategies are hoisted to the
+# top of the candidate list so we try the targeted fix first.
+# Empty/unknown block_type → no hoisting, default priority order applies.
+BLOCK_TYPE_TAGS: dict[str, str] = {
+    "HTTP2_STREAM_KILL": "h2_downgrade",
+    # Future: SNI_FILTER → "fake_hello_inject", THROTTLING → "anti_throttle"
+}
+
+
 @dataclass
 class HostStrategy:
     """Working strategy for a specific host."""
@@ -99,6 +109,7 @@ class HostSolver:
         isp: str = "unknown",
         strategies_to_try: Optional[list[dict]] = None,
         on_progress: Optional[callable] = None,
+        block_type: str = "",
     ) -> Optional[HostStrategy]:
         """Escalation ladder: try increasingly aggressive methods per host.
 
@@ -106,6 +117,12 @@ class HostSolver:
         Level 2: Anti-H2 strategies (wssize=1 breaks HTTP/2 mux)
         Level 3: ByeDPI SOCKS proxy for this host
         Level 4: Report to user — needs VPN
+
+        Args:
+            block_type: optional classification from BlockageClassifier
+                (HTTP2_STREAM_KILL, SNI_FILTER, ...). When set, strategies
+                tagged for this block type are tried first — much faster
+                recovery for known patterns. Empty → default priority order.
 
         Returns HostStrategy with method="zapret"|"byedpi"|None
         """
@@ -134,6 +151,25 @@ class HostSolver:
 
         # ── Level 1: Standard zapret2 strategies ──────────────────────
         candidates = strategies_to_try or KNOWN_STRATEGIES
+
+        # Block-type-aware reordering: hoist strategies tagged for the
+        # detected block type to the front so we try the targeted fix
+        # first. Falls back to default order if nothing matches.
+        if block_type and block_type in BLOCK_TYPE_TAGS:
+            tag = BLOCK_TYPE_TAGS[block_type]
+            tagged, untagged = [], []
+            for strat in candidates:
+                if tag in strat.get("tags", []):
+                    tagged.append(strat)
+                else:
+                    untagged.append(strat)
+            if tagged:
+                logger.info(
+                    "Solving %s: block_type=%s, hoisting %d %s-tagged strategies",
+                    host, block_type, len(tagged), tag,
+                )
+                candidates = tagged + untagged
+
         logger.info("Solving %s: Level 1 — %d strategies", host, len(candidates))
 
         best_fitness = 0.0

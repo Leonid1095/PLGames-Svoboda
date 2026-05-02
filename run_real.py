@@ -1351,11 +1351,13 @@ def main():
                 # Step 1: Classify
                 ui.step("Step 1: Block analysis...")
                 _rc = BlockageClassifier(timeout=5)
+                _wd_block_types: dict[str, str] = {}
                 for fh in list(degraded)[:3]:
                     try:
                         a = _rc.classify(fh)
                         ui.block_status(fh, a.block_type, a.confidence, a.evidence)
                         ai_feedback.record_test([f"watchdog:{fh}"], 0.0, failure_mode=a.block_type.lower())
+                        _wd_block_types[fh] = a.block_type
                     except Exception:
                         pass
 
@@ -1476,7 +1478,9 @@ def main():
                         sv = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
                         try:
                             for fh in bad[:2]:
-                                r = sv.solve(fh, isp=isp_name)
+                                # Reuse Step 1 classification when available
+                                bt = _wd_block_types.get(fh, "") if "_wd_block_types" in dir() else ""
+                                r = sv.solve(fh, isp=isp_name, block_type=bt)
                                 if r:
                                     ui.ok(f"Solved {fh}: fitness={r.fitness:.3f}")
                         finally:
@@ -1567,7 +1571,10 @@ def main():
                     _active_process = None
                 try:
                     solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
-                    result = solver.solve(host, isp=isp_name)
+                    # Pass block_type so solver can hoist matching strategies
+                    # (e.g. HTTP2_STREAM_KILL → h2_downgrade family first)
+                    bt = blocked[host].block_type if blocked.get(host) else ""
+                    result = solver.solve(host, isp=isp_name, block_type=bt)
                     if result:
                         return {"strategy": " | ".join(result.flags), "fitness": result.fitness}
                     return {"strategy": "", "fitness": 0.0}
