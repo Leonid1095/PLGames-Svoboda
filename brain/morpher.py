@@ -188,3 +188,31 @@ class TrafficMorpher:
     def get_profile_names() -> list[str]:
         """List available profiles."""
         return list(PROFILES.keys())
+
+    # ── Round-robin rotation for warm-pool failover ─────────────────────
+    # TSPU now does statistical analysis on JA3/JA4. A single profile used
+    # over many connections becomes a fingerprint TSPU can blocklist. Each
+    # failover (next_alternative in HostSolver) advances this index so the
+    # subsequent winws2 restart uses a different browser fingerprint with
+    # the swapped strategy. Never go back to a profile recently used.
+    _rotation_idx: int = 0
+
+    @classmethod
+    def next_profile_name(cls, exclude: Optional[str] = None) -> str:
+        """Advance the rotation index and return the next profile name.
+
+        Args:
+            exclude: profile name to skip (typically the currently active
+                one, so we always rotate to *some other* profile).
+
+        Returns:
+            Next profile name in deterministic round-robin order.
+        """
+        names = list(PROFILES.keys())
+        for _ in range(len(names)):
+            cls._rotation_idx = (cls._rotation_idx + 1) % len(names)
+            candidate = names[cls._rotation_idx]
+            if candidate != exclude:
+                return candidate
+        # All profiles equal exclude (only one profile? impossible with PROFILES dict)
+        return names[0]

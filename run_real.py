@@ -284,6 +284,7 @@ def _start_permanent_zapret(
     hostlist: Optional[Path] = None, tspu_ttl: int = 0,
     config: Optional[dict] = None,
     extra_profiles: list[str] = None,
+    morpher_profile: Optional[str] = None,
 ) -> Optional[subprocess.Popen]:
     """Start winws2/nfqws2 permanently with the given strategy.
 
@@ -347,10 +348,16 @@ def _start_permanent_zapret(
                 except Exception:
                     pass
 
-    # Traffic morphing: apply browser TLS profile
+    # Traffic morphing: apply browser TLS profile.
+    # morpher_profile arg (warm-pool failover, network change, etc.) takes
+    # precedence over the static config default, enabling JA3/JA4 rotation
+    # across winws2 restarts to defeat statistical fingerprinting by TSPU.
     from brain.morpher import TrafficMorpher
+    _profile_name = morpher_profile or (
+        config.get("morphing_profile", "chrome_win") if config else "chrome_win"
+    )
     morpher = TrafficMorpher(
-        profile_name=config.get("morphing_profile", "chrome_win") if config else "chrome_win",
+        profile_name=_profile_name,
         enabled=config.get("morphing_enabled", True) if config else True,
     )
     # NOTE: tls_init disabled — the lua-init with spaces in argument
@@ -1066,6 +1073,11 @@ def main():
         _wd_flags = list(current_flags)
         _wd_sid = strategy_id
         _wd_extra = []
+        # Active JA3/JA4 morpher profile — rotated on warm-pool failover
+        # so each restart presents a different browser fingerprint to TSPU's
+        # statistical analyzer. Initialised from config; None means "use the
+        # config default (chrome_win)".
+        _wd_morpher_profile: Optional[str] = config.get("morphing_profile") if config else None
 
         # Load saved per-host strategies on entry
         try:
@@ -1314,7 +1326,18 @@ def main():
                             # vs 5-30 min for re-enum across all KNOWN_STRATEGIES.
                             alt = solver.next_alternative(fh)
                             if alt:
-                                ui.ok(f"{fh}: warm-pool failover (fitness={alt.fitness:.3f})")
+                                # Also rotate JA3/JA4 morpher profile so the
+                                # new connection presents a different browser
+                                # fingerprint — defeats statistical pattern
+                                # detection that hashed the previous one.
+                                from brain.morpher import TrafficMorpher
+                                _wd_morpher_profile = TrafficMorpher.next_profile_name(
+                                    exclude=_wd_morpher_profile,
+                                )
+                                ui.ok(
+                                    f"{fh}: warm-pool failover (fitness={alt.fitness:.3f}, "
+                                    f"morpher→{_wd_morpher_profile})"
+                                )
                                 solved = True
                                 continue
                             # Pool exhausted — fall through to full re-solve
@@ -1334,6 +1357,7 @@ def main():
                     _active_process = _start_permanent_zapret(
                         zapret_bin, lua_dir, _wd_flags, hostlist,
                         _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
+                        morpher_profile=_wd_morpher_profile,
                     )
                     if not _active_process:
                         # Fallback: restart without per-host profiles
@@ -1646,6 +1670,18 @@ def main():
                 for h, r in blocked.items()
             }
 
+            # Conductor-v2 fields: warm-pool snapshot + recent morpher rotation
+            try:
+                from brain.host_solver import HostSolver as _HSCtx
+                _hs_ctx = _HSCtx(config)
+                _warm_pool_snapshot = {
+                    h: ([{"flags": s.flags, "fitness": s.fitness, "name": "current"}]
+                        + s.alternatives)
+                    for h, s in _hs_ctx.get_all().items()
+                }
+            except Exception:
+                _warm_pool_snapshot = {}
+
             context = build_engine_context(
                 isp=isp_name,
                 asn=asn if 'asn' in dir() else "",
@@ -1653,6 +1689,8 @@ def main():
                 block_analysis=block_analysis_dict,
                 test_history=[r.to_dict() for r in ai_feedback.history[-10:]],
                 excluded_functions=list(ai_feedback.get_excluded_functions()),
+                warm_pool=_warm_pool_snapshot,
+                active_morpher=_wd_morpher_profile or "",
             )
 
             engine = AIEngine(

@@ -346,6 +346,21 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 - **Верификация**: smoke-тест 1000 итераций → 859 попаданий в `[rec-1..rec+1]` c recommended_ttl=3 vs 184 у рандома — **4.7× эффективнее**
 - Было: 93% мутаций TTL ≥ 6 никогда не достигали TSPU (middlebox на hop=3). Стало: GA концентрируется на реально рабочем окне.
 
+**Phase F': AI conductor v2** (`brain/ai_engine.py`, `run_real.py`)
+- SYSTEM_PROMPT обновлён: AI теперь знает про `alpn_strip` family, h2_downgrade стратегии (рекомендация по HTTP2_STREAM_KILL переписана от устаревшего wssize=1 на современный alpn_strip), explicit предупреждение про fake packets на TSPU (April 2026)
+- Новый KEY PRIMITIVES блок в SYSTEM_PROMPT: alpn_strip / multisplit / multidisorder / wssize / fake — что делает каждый, когда применять, на каких ISP отключать
+- `build_engine_context()` расширен полями: `warm_pool` (snapshot всех per-host pools — AI видит что уже кешировано), `active_morpher` (текущий JA3 профиль), `morpher_history` (последние использованные)
+- `run_real.py` собирает warm_pool snapshot перед вызовом AI engine, передаёт `_wd_morpher_profile` как active_morpher
+- AI теперь дирижёр в полной мере: видит ISP, TSPU profile, block_types, test_history, excluded_functions, warm_pool, active_morpher → решает направление (forbid_genes для disable, prefer family через выбор tool args)
+
+**Bonus: Morpher JA3/JA4 rotation в warm pool failover** (`brain/morpher.py`, `run_real.py`)
+- `TrafficMorpher.next_profile_name(exclude=...)` — round-robin через 6 профилей (chrome_win/firefox_win/firefox_linux/safari_mac/edge_win/chrome_android), никогда не возвращает только что использованный
+- `_start_permanent_zapret(morpher_profile=...)` — новый kwarg, override config default
+- Watchdog: при warm-pool failover (когда `next_alternative` возвращает alt) ALSO advance morpher → каждое восстановление меняет ОДНОВРЕМЕННО стратегию И TLS-фингерпринт. Защита от статистического fingerprinting TSPU.
+- `_wd_morpher_profile` global отслеживает текущий профиль через все рестарты winws2 в watchdog
+
+**Bonus: byedpi cascade — N/A** — анализ показал: byedpi уже wired в `host_solver` Level 3 (для no-admin сценариев и SNI блоков). В `proxy_router` дополнительный wire-up не имеет смысла (byedpi не туннель, не помогает против IP-блоков).
+
 **Phase C': Warm pool & fast failover per-host** (`brain/host_solver.py`, `run_real.py`)
 - `HostStrategy.alternatives` — список top-N-1 fallback стратегий (sorted by fitness desc)
 - `solve()` теперь собирает top-3 (не только лучший один). Early-break изменён: ждёт хотя бы 2 кандидата в пуле перед выходом, иначе failover не имеет смысла.

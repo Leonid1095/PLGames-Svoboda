@@ -110,12 +110,32 @@ DECISION RULES:
    For each FAIL host, run get_block_analysis to understand WHY.
 
 4. Based on block analysis:
-   - SNI_FILTERING → multisplit/multidisorder strategies work
-   - HTTP2_STREAM_KILL → needs wssize:wsize=1 + multidisorder
+   - SNI_FILTERING → multisplit/multidisorder strategies work (Tier 0 nofake first)
+   - HTTP2_STREAM_KILL → use the h2_downgrade family (alpn_strip:strip=h2,h2c
+     stripped from ALPN forces server to HTTP/1.1, which TSPU does not
+     stream-kill). Strategy names start with `h2downgrade_`. The Block-type
+     dispatcher already hoists these to top of candidates when block_type
+     is set on the solver call — you usually don't need to specify them
+     manually unless they're being skipped.
    - RST_INJECTION → fake MAY work (check if fake is excluded first!)
    - IP_BLOCK → STOP. Nothing works at packet level. Need proxy.
    - THROTTLING → wssize manipulation, accept throttled connections
    - TLS_INTERFERENCE → most aggressive. Try multisplit:pos=1:seqovl=4096
+
+KEY PRIMITIVES (2026):
+   - alpn_strip:strip=h2,h2c — removes h2 from ALPN, forces HTTP/1.1.
+     Pure-local, defeats HTTP2_STREAM_KILL without any tunnel/proxy.
+   - multisplit:pos=1:seqovl=N — TLS ClientHello fragmentation, splits SNI
+     across packets so DPI cannot read it. Larger N (568, 681, 4096) more
+     aggressive but higher latency.
+   - multidisorder:pos=1,midsld — out-of-order TCP segments to confuse
+     stateful DPI reassembly.
+   - wssize:wsize=1:scale=0 — TCP window=1 forces tiny packets, defeats
+     statistical analyzers but ~3× slower.
+   - fake:blob=fake_default_tls:ip_ttl=N — sends fake ClientHello with low
+     TTL so it expires AT the middlebox. BLOCKED on TSPU (April 2026):
+     TSPU detects and drops all fake packets. ALWAYS forbid fake on TSPU
+     ISPs (er-telecom, Rostelecom Tatarstan, Dom.ru).
 
 5. For persistent FAIL hosts, run run_per_host_solver (max 2 hosts).
 
@@ -335,10 +355,22 @@ def build_engine_context(
     excluded_functions: list[str],
     best_known_strategy: str = "",
     best_known_fitness: float = 0.0,
+    warm_pool: Optional[dict[str, list[dict]]] = None,
+    morpher_history: Optional[list[str]] = None,
+    active_morpher: str = "",
 ) -> dict:
     """Build structured context for AI Engine.
 
     This is what AI sees — the more detailed, the better AI reasons.
+
+    Args:
+        warm_pool: per-host failover pool {host: [{flags, fitness, name}]}.
+            Lets AI see what alternatives are pre-tested and decide whether
+            to try a fresh enumeration vs trusting the pool.
+        morpher_history: recent JA3/JA4 profiles used (oldest -> newest).
+            Lets AI detect "we already cycled through every profile, none
+            worked — block is not at fingerprint layer".
+        active_morpher: currently active browser fingerprint profile.
     """
     return {
         "isp": isp,
@@ -359,5 +391,11 @@ def build_engine_context(
             "strategy": best_known_strategy,
             "fitness": best_known_fitness,
         },
+        # Conductor-v2 fields: AI now sees what's already been tried and
+        # what fallback alternatives are warmed up — informs whether to
+        # trust the pool, escalate to GA, or rotate fingerprints further.
+        "warm_pool": warm_pool or {},
+        "active_morpher": active_morpher,
+        "morpher_history": (morpher_history or [])[-8:],
         "goal": "Unblock ALL hosts. Fitness > 0.5 for each.",
     }
