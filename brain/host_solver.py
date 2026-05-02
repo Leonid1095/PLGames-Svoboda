@@ -36,12 +36,21 @@ BLOCK_TYPE_TAGS: dict[str, str] = {
 
 @dataclass
 class HostStrategy:
-    """Working strategy for a specific host."""
+    """Working strategy for a specific host.
+
+    `alternatives` is a warm pool of fallback strategies (top-2 after the
+    current best). On per-host degradation, watchdog calls
+    `HostSolver.next_alternative(host)` to promote pool[0] to current
+    instantly — a winws2 restart with the swapped flags is ~5-10s vs
+    a full re-enumeration which is 5-30 minutes.
+    """
     host: str
     flags: list[str]
     fitness: float
     isp: str = "unknown"
     tested_at: float = 0.0
+    # Top-N-1 alternatives, highest fitness first. Each: {flags, fitness}
+    alternatives: list[dict] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -50,6 +59,7 @@ class HostStrategy:
             "fitness": self.fitness,
             "isp": self.isp,
             "tested_at": self.tested_at,
+            "alternatives": self.alternatives,
         }
 
     @classmethod
@@ -58,6 +68,7 @@ class HostStrategy:
             host=d["host"], flags=d["flags"],
             fitness=d.get("fitness", 0.0), isp=d.get("isp", "unknown"),
             tested_at=d.get("tested_at", 0.0),
+            alternatives=d.get("alternatives", []),
         )
 
 
@@ -91,6 +102,40 @@ class HostSolver:
             except Exception:
                 pass
             self._byedpi = None
+
+    def next_alternative(self, host: str) -> Optional[HostStrategy]:
+        """Fast failover: promote next warm-pool alternative to current.
+
+        When the current per-host strategy degrades (TSPU re-blocked it,
+        or it just stopped working), call this to swap to the next-best
+        cached alternative without a full re-enumeration. Demotes the
+        current strategy to the end of the alternatives list so we cycle
+        through all warm-pool entries before truly giving up.
+
+        Returns the new current HostStrategy, or None if the pool is
+        exhausted (caller should then run solve() to rebuild).
+        """
+        hs = self._strategies.get(host)
+        if not hs or not hs.alternatives:
+            return None
+
+        # Promote alternatives[0] -> current, push old current to end.
+        promoted = hs.alternatives.pop(0)
+        old = {"flags": hs.flags, "fitness": hs.fitness, "name": "previous"}
+        hs.flags = promoted["flags"]
+        hs.fitness = float(promoted.get("fitness", 0.0))
+        hs.tested_at = time.time()
+        # Park the old current at the back of the pool so we round-robin
+        # through alternatives instead of dropping them after one cycle.
+        hs.alternatives.append(old)
+
+        self._strategies[host] = hs
+        self._save()
+        logger.info(
+            "Failover %s: promoted alt -> current (fitness=%.3f, %d alts left in pool)",
+            host, hs.fitness, len(hs.alternatives),
+        )
+        return hs
 
     def get(self, host: str) -> Optional[HostStrategy]:
         """Get cached per-host strategy."""
@@ -172,9 +217,19 @@ class HostSolver:
 
         logger.info("Solving %s: Level 1 — %d strategies", host, len(candidates))
 
+        # Track top-3 strategies above acceptance threshold to build a warm
+        # pool. After loop, [0] is current; [1:] become alternatives so a
+        # later degradation triggers a fast failover instead of full re-enum.
+        # Each entry: (fitness, flags, name)
+        top: list[tuple[float, list[str], str]] = []
+        # Single best regardless of pool threshold — used as fallback so we
+        # still accept a weak (0.3..0.5) strategy when nothing strong exists,
+        # matching the prior behavior.
         best_fitness = 0.0
-        best_flags = []
+        best_flags: list[str] = []
         best_name = ""
+        POOL_THRESHOLD = 0.5
+        POOL_MAX = 3
 
         for i, strat in enumerate(candidates):
             name = strat.get("name", f"strategy_{i}")
@@ -197,13 +252,48 @@ class HostSolver:
                 )
 
             if fitness > best_fitness:
-                best_fitness = fitness
-                best_flags = flags
-                best_name = name
+                best_fitness, best_flags, best_name = fitness, flags, name
+            if fitness >= POOL_THRESHOLD:
+                top.append((fitness, flags, name))
+                top.sort(key=lambda x: x[0], reverse=True)
+                del top[POOL_MAX:]
 
-            if fitness > 0.8:  # Fast response — great, use it
+            # Early-break: don't break on a single strong hit — wait for at
+            # least 2 alternatives so the warm pool isn't starving.
+            # Without a populated pool, fast-failover degrades to full re-enum
+            # which defeats the entire warm-pool design.
+            if len(top) >= POOL_MAX and top[-1][0] > 0.6:
+                break
+            if fitness > 0.8 and len(top) >= 2:
                 break
 
+        if top:
+            best_fitness, best_flags, best_name = top[0]
+            alternatives = [
+                {"flags": flags, "fitness": fit, "name": name}
+                for fit, flags, name in top[1:]
+            ]
+            hs = HostStrategy(
+                host=host, flags=best_flags, fitness=best_fitness,
+                isp=isp, tested_at=time.time(),
+                alternatives=alternatives,
+            )
+            self._strategies[host] = hs
+            self._save()
+            logger.info(
+                "Solved %s: Level 1 — %s (fitness=%.3f, +%d alt in warm pool)",
+                host, best_name, best_fitness, len(alternatives),
+            )
+            if self._sync and best_fitness > 0.5:
+                try:
+                    self._sync.report_host_strategy(host, best_flags, best_fitness, isp)
+                except Exception:
+                    pass
+            return hs
+
+        # Weak-but-positive fallback: nothing crossed POOL_THRESHOLD but we
+        # found something better than nothing. Preserves prior behavior of
+        # accepting fitness > 0.3 strategies, just without a warm pool.
         if best_fitness > 0.3:
             hs = HostStrategy(
                 host=host, flags=best_flags, fitness=best_fitness,
@@ -211,12 +301,10 @@ class HostSolver:
             )
             self._strategies[host] = hs
             self._save()
-            logger.info("Solved %s: Level 1 — %s (fitness=%.3f)", host, best_name, best_fitness)
-            if self._sync and best_fitness > 0.5:
-                try:
-                    self._sync.report_host_strategy(host, best_flags, best_fitness, isp)
-                except Exception:
-                    pass
+            logger.info(
+                "Solved %s: Level 1 (weak) — %s (fitness=%.3f, no warm pool)",
+                host, best_name, best_fitness,
+            )
             return hs
 
         # ── Level 2: Anti-H2 strategies (wssize=1) ───────────────────

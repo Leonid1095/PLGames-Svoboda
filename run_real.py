@@ -1306,9 +1306,19 @@ def main():
                     for fh in pfails:
                         if not _running:
                             break
-                        if solver.get(fh):
-                            ui.info(f"{fh}: already solved")
-                            continue
+                        existing = solver.get(fh)
+                        if existing:
+                            # Cached strategy stopped working — try the next
+                            # warm-pool alternative BEFORE doing a full re-solve.
+                            # Pool swap is ~5-10s (winws2 restart with new flags)
+                            # vs 5-30 min for re-enum across all KNOWN_STRATEGIES.
+                            alt = solver.next_alternative(fh)
+                            if alt:
+                                ui.ok(f"{fh}: warm-pool failover (fitness={alt.fitness:.3f})")
+                                solved = True
+                                continue
+                            # Pool exhausted — fall through to full re-solve
+                            ui.info(f"{fh}: warm pool exhausted, full re-solve")
                         ui.step(f"Solving: {fh}")
                         sr = solver.solve(fh, isp=isp_name)
                         if sr:

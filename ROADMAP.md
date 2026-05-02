@@ -346,6 +346,16 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 - **Верификация**: smoke-тест 1000 итераций → 859 попаданий в `[rec-1..rec+1]` c recommended_ttl=3 vs 184 у рандома — **4.7× эффективнее**
 - Было: 93% мутаций TTL ≥ 6 никогда не достигали TSPU (middlebox на hop=3). Стало: GA концентрируется на реально рабочем окне.
 
+**Phase C': Warm pool & fast failover per-host** (`brain/host_solver.py`, `run_real.py`)
+- `HostStrategy.alternatives` — список top-N-1 fallback стратегий (sorted by fitness desc)
+- `solve()` теперь собирает top-3 (не только лучший один). Early-break изменён: ждёт хотя бы 2 кандидата в пуле перед выходом, иначе failover не имеет смысла.
+- Новый метод `HostSolver.next_alternative(host)` — promotes pool[0]→current, демотит старый current в конец (round-robin), возвращает новый current или None если пул исчерпан
+- Watchdog: при streak_fail≥3 для host'а с кешированной стратегией сначала вызывается `next_alternative` — **5-10с failover** вместо 5-30 мин re-enum. Только если пул исчерпан — полный re-solve.
+- Persistence: `alternatives` сохраняется в `host_strategies.json`, backward-compat с старыми записями
+- 3 новых unit-теста: `test_warm_pool_built_with_top_3`, `test_next_alternative_failover`, `test_next_alternative_returns_none_when_pool_empty`
+- Всего тестов: 113 (было 110, +3 для warm pool)
+- Старый тест `test_level1_early_exit_on_high_fitness` обновлён до `test_level1_early_exit_after_warm_pool_filled` — отражает новое поведение (тестируем 2 стратегии перед early-break чтобы наполнить pool)
+
 **Block-type-aware dispatcher** (`brain/host_solver.py`, `brain/discovery.py`, `run_real.py`)
 - `BLOCK_TYPE_TAGS = {"HTTP2_STREAM_KILL": "h2_downgrade"}` — расширяемая таблица
 - `HostSolver.solve(block_type=...)` — стратегии с матчинг-тегом hoisted в начало кандидатов, остальные сохраняют исходный порядок как fallback

@@ -100,8 +100,10 @@ class TestHostSolver(unittest.TestCase):
         # Level 2 also returns 0.1, so overall result is None
         self.assertIsNone(result)
 
-    def test_level1_early_exit_on_high_fitness(self):
-        """Fitness > 0.8 should stop trying more strategies."""
+    def test_level1_early_exit_after_warm_pool_filled(self):
+        """Fitness > 0.8 should stop, but only after warm pool has at least
+        2 alternatives — single strong hit alone leaves failover with no
+        cached alternative, defeating the warm-pool design."""
         mock_tester = MagicMock()
         call_count = 0
 
@@ -118,7 +120,10 @@ class TestHostSolver(unittest.TestCase):
             {"name": "s3", "flags": ["f3"]},
         ])
         self.assertIsNotNone(result)
-        self.assertEqual(call_count, 1)  # Should stop after first
+        # Test 2 strategies (filling pool to size 2 with fitness>0.8) then break.
+        # Pool has 1 alternative for fast failover.
+        self.assertEqual(call_count, 2)
+        self.assertEqual(len(result.alternatives), 1)
 
     def test_cached_strategy_within_24h(self):
         """get() should return cached strategy if < 24h old."""
@@ -205,6 +210,76 @@ class TestHostSolver(unittest.TestCase):
         result = solver.solve("fallback.example.com", isp="test",
                               strategies_to_try=[{"name": "t", "flags": ["f"]}])
         self.assertIsNotNone(result)  # Should still find via Level 1
+
+    def test_warm_pool_built_with_top_3(self):
+        """solve() should build a warm pool of up to top-3 strategies.
+
+        Scores chosen below the >0.8 early-break so we walk the full list.
+        Pool stops growing once 3 strategies are accepted with the worst > 0.6.
+        """
+        mock_tester = MagicMock()
+        # 4 strategies above pool threshold, all under the 0.8 early-break,
+        # so the loop walks at least 3 to fill the pool then breaks.
+        scores = iter([0.78, 0.72, 0.65, 0.58])
+        mock_tester.test_strategy_single_host.side_effect = lambda f, h: next(scores)
+
+        solver = self._make_solver(tester=mock_tester)
+        result = solver.solve("pool.example.com", strategies_to_try=[
+            {"name": "s1", "flags": ["a"]},
+            {"name": "s2", "flags": ["b"]},
+            {"name": "s3", "flags": ["c"]},
+            {"name": "s4", "flags": ["d"]},
+        ])
+        self.assertIsNotNone(result)
+        self.assertAlmostEqual(result.fitness, 0.78)
+        # Pool size 3 -> 1 current + 2 alternatives
+        self.assertEqual(len(result.alternatives), 2)
+        # Alternatives sorted descending by fitness
+        self.assertGreater(result.alternatives[0]["fitness"], result.alternatives[1]["fitness"])
+
+    def test_next_alternative_failover(self):
+        """next_alternative() promotes pool[0] -> current, recycles old."""
+        mock_tester = MagicMock()
+        scores = iter([0.78, 0.72, 0.65])
+        mock_tester.test_strategy_single_host.side_effect = lambda f, h: next(scores)
+
+        solver = self._make_solver(tester=mock_tester)
+        solver.solve("fail.example.com", strategies_to_try=[
+            {"name": "s1", "flags": ["a"]},
+            {"name": "s2", "flags": ["b"]},
+            {"name": "s3", "flags": ["c"]},
+        ])
+        original = solver.get("fail.example.com")
+        self.assertEqual(original.flags, ["a"])
+        self.assertEqual(len(original.alternatives), 2)
+
+        # Failover: should promote ["b"] to current, push ["a"] to back
+        new = solver.next_alternative("fail.example.com")
+        self.assertIsNotNone(new)
+        self.assertEqual(new.flags, ["b"])
+        self.assertAlmostEqual(new.fitness, 0.72)
+        # Pool size unchanged (2 alternatives), order rotated
+        self.assertEqual(len(new.alternatives), 2)
+        self.assertEqual(new.alternatives[-1]["flags"], ["a"])  # old current at back
+
+    def test_next_alternative_returns_none_when_pool_empty(self):
+        """next_alternative() returns None when no alternatives available."""
+        mock_tester = MagicMock()
+        # Single strong hit — but new code tests 2 to fill pool
+        # Force only 1 by giving second a sub-threshold score
+        scores = iter([0.95, 0.4])
+        mock_tester.test_strategy_single_host.side_effect = lambda f, h: next(scores)
+
+        solver = self._make_solver(tester=mock_tester)
+        solver.solve("solo.example.com", strategies_to_try=[
+            {"name": "s1", "flags": ["a"]},
+            {"name": "s2", "flags": ["b"]},
+        ])
+        # Pool should have 1 entry (only first crossed threshold)
+        result = solver.get("solo.example.com")
+        self.assertEqual(len(result.alternatives), 0)
+        # Failover with empty pool returns None
+        self.assertIsNone(solver.next_alternative("solo.example.com"))
 
     def test_ai_feedback_excludes_flags(self):
         """AI feedback should exclude certain functions."""
