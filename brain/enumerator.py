@@ -92,6 +92,53 @@ KNOWN_STRATEGIES: list[dict] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
+    # TIER 0.5: H2 DOWNGRADE FAMILY (for HTTP2_STREAM_KILL hosts)
+    # TSPU lets the TLS handshake complete, then kills the H/2 stream
+    # after a few KB (Discord, YouTube watch-pages, others). Pure desync
+    # cannot fix this — it's an L7 attack on h2 framing.
+    # `alpn_strip` removes h2 from ALPN in ClientHello, forcing the server
+    # to fall back to HTTP/1.1 which TSPU does not stream-kill.
+    # Per-host: applied only to hosts the classifier marks HTTP2_STREAM_KILL.
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "h2downgrade_alpn_only",
+        "flags": [
+            "alpn_strip:strip=h2,h2c",
+        ],
+        "desc": "H2 downgrade: pure ALPN strip, forces HTTP/1.1 (Discord/YouTube h2-kill bypass)",
+        "tags": ["h2_downgrade", "per_host"],
+    },
+    {
+        "name": "h2downgrade_split568",
+        "flags": [
+            "alpn_strip:strip=h2,h2c",
+            "multisplit:pos=1:seqovl=568",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "H2 downgrade + nofake split@568 + disorder (best-of-both for stubborn TSPU)",
+        "tags": ["h2_downgrade", "per_host"],
+    },
+    {
+        "name": "h2downgrade_split4096",
+        "flags": [
+            "alpn_strip:strip=h2,h2c",
+            "multisplit:pos=1:seqovl=4096",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "H2 downgrade + 4KB overlap (anti-throttle for downgraded HTTP/1.1 streams)",
+        "tags": ["h2_downgrade", "per_host"],
+    },
+    {
+        "name": "h2downgrade_disorder_seqovl5",
+        "flags": [
+            "alpn_strip:strip=h2,h2c",
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "H2 downgrade + TLS-record overlap disorder",
+        "tags": ["h2_downgrade", "per_host"],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
     # TIER 1: COMMUNITY PROVEN (Flowseal ALT11, Dronatar v4.6)
     # These use fake packets — work on ISPs that don't detect fake.
     # ══════════════════════════════════════════════════════════════════

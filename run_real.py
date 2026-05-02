@@ -337,6 +337,16 @@ def _start_permanent_zapret(
         # if auto.exists():
         #     cmd.append(f"--lua-init=@{os.path.relpath(str(auto), base)}")
 
+        # Load PLGames Svoboda custom lua primitives (alpn_strip etc).
+        # These extend zapret-antidpi.lua with our own desync functions.
+        project_lua_dir = BASE_DIR / "lua"
+        if project_lua_dir.exists():
+            for svoboda_lua in sorted(project_lua_dir.glob("svoboda_*.lua")):
+                try:
+                    cmd.append(f"--lua-init=@{os.path.relpath(str(svoboda_lua), base)}")
+                except Exception:
+                    pass
+
     # Traffic morphing: apply browser TLS profile
     from brain.morpher import TrafficMorpher
     morpher = TrafficMorpher(

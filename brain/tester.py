@@ -452,6 +452,15 @@ class ConnectionTester:
             if antidpi_path.exists():
                 rel = os.path.relpath(str(antidpi_path), base)
                 cmd.append(f"--lua-init=@{rel}")
+            # Load PLGames Svoboda custom lua primitives (alpn_strip etc)
+            project_lua_dir = self._base_dir / "lua"
+            if project_lua_dir.exists():
+                for svoboda_lua in sorted(project_lua_dir.glob("svoboda_*.lua")):
+                    try:
+                        rel = os.path.relpath(str(svoboda_lua), base)
+                        cmd.append(f"--lua-init=@{rel}")
+                    except Exception:
+                        pass
 
         # Hostlist: only apply desync to blocked domains (prevents breaking all traffic)
         if self._hostlist_path and self._hostlist_path.exists() and self._zapret_dir:

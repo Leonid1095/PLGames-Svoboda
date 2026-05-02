@@ -346,6 +346,14 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 - **Верификация**: smoke-тест 1000 итераций → 859 попаданий в `[rec-1..rec+1]` c recommended_ttl=3 vs 184 у рандома — **4.7× эффективнее**
 - Было: 93% мутаций TTL ≥ 6 никогда не достигали TSPU (middlebox на hop=3). Стало: GA концентрируется на реально рабочем окне.
 
+**Phase A: H2 downgrade primitive** (`lua/svoboda_h2_downgrade.lua`, `brain/enumerator.py`)
+- Новый custom lua-desync `alpn_strip` — модифицирует TLS ClientHello in-place, удаляя h2/h2c из ALPN extension. Сервер падает на HTTP/1.1, TSPU не убивает h2 stream (потому что его нет).
+- 4 новые стратегии в enumerator (Tier 0.5, между nofake и community):
+  `h2downgrade_alpn_only`, `h2downgrade_split568`, `h2downgrade_split4096`, `h2downgrade_disorder_seqovl5`
+- `tester.py` и `run_real.py` загружают все `lua/svoboda_*.lua` через `--lua-init` после zapret-antidpi
+- Целевой эффект: Discord перестаёт throttle'иться (HTTP2_STREAM_KILL обходится без туннеля)
+- Per-host solver автоматически дойдёт до alpn_strip для хостов где Tier 0 не пробил — без явного wiring блок-классификатора (стратегии в правильной приоритетной позиции)
+
 ### Оставшиеся пункты аудита (приоритет)
 - [ ] **№4b Enumerator ISP-prioritization** — сортировать 62+ стратегий по рейтингу успеха для данной ISP (данные с сервера или локально накопленные)
 - [ ] **№5 Network change → force re-enum** — при смене IP сбрасывать `_wd_flags`, не только TTL
