@@ -346,6 +346,14 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 - **Верификация**: smoke-тест 1000 итераций → 859 попаданий в `[rec-1..rec+1]` c recommended_ttl=3 vs 184 у рандома — **4.7× эффективнее**
 - Было: 93% мутаций TTL ≥ 6 никогда не достигали TSPU (middlebox на hop=3). Стало: GA концентрируется на реально рабочем окне.
 
+**Phase E': Geneva primitives — alpn_modify operator** (`brain/geneva.py`)
+- Geneva DSL уже была реализована (operators: fragment / tamper / duplicate / drop / sleep / inject) с translators в zapret2 lua-desync
+- Добавлен новый operator `alpn_modify` (TLS-payload mutation, отдельная категория от `tamper` который для IP/TCP полей) — translates to `alpn_strip:strip=...:keep_min=...`
+- 3 новых GenevaStrategy для ru/tspu с alpn_modify: `ru_h2downgrade_disorder` (effectiveness 0.8), `ru_h2downgrade_split568` (0.82, для default warm-pool), `ru_h2downgrade_flood` (0.78, anti-throttle для длинных HTTP/1.1 download)
+- `_flags_to_ops` reverse-parser теперь распознаёт `alpn_strip` → `alpn_modify` operator с extracted strip + keep_min params
+- `mutate_flags_geneva` теперь работает с alpn_strip: GA может мутировать h2_downgrade стратегии semantically (хотя композер может иногда дропать operator при мутации — strategies всё равно выживают через selection из-за высокой effectiveness в seeds)
+- Smoke-test: 3/12 seeds для ru/tspu теперь включают alpn_strip — GA сразу стартует с h2_downgrade в популяции
+
 **Phase F': AI conductor v2** (`brain/ai_engine.py`, `run_real.py`)
 - SYSTEM_PROMPT обновлён: AI теперь знает про `alpn_strip` family, h2_downgrade стратегии (рекомендация по HTTP2_STREAM_KILL переписана от устаревшего wssize=1 на современный alpn_strip), explicit предупреждение про fake packets на TSPU (April 2026)
 - Новый KEY PRIMITIVES блок в SYSTEM_PROMPT: alpn_strip / multisplit / multidisorder / wssize / fake — что делает каждый, когда применять, на каких ISP отключать

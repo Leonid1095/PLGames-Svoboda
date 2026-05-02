@@ -133,6 +133,21 @@ def _translate_inject(op: GenevaOp) -> list[str]:
     return ["oob"]
 
 
+def _translate_alpn_modify(op: GenevaOp) -> list[str]:
+    """alpn_modify(strip) → alpn_strip (TLS-layer h2 downgrade primitive).
+
+    Distinct category from `tamper` because it operates on the TLS handshake
+    payload (not IP/TCP fields). Effective against HTTP2_STREAM_KILL — TSPU
+    can't kill an HTTP/2 stream that the negotiation never establishes.
+    """
+    strip = op.params.get("strip", "h2,h2c")
+    keep_min = op.params.get("keep_min", 1)
+    parts = ["alpn_strip", f"strip={strip}"]
+    if keep_min != 1:
+        parts.append(f"keep_min={keep_min}")
+    return [":".join(parts)]
+
+
 def _noop(op: GenevaOp) -> list[str]:
     return []
 
@@ -144,6 +159,7 @@ _TRANSLATORS = {
     "drop": _translate_drop,
     "sleep": _translate_sleep,
     "inject": _translate_inject,
+    "alpn_modify": _translate_alpn_modify,
 }
 
 
@@ -196,6 +212,42 @@ _RU_STRATEGIES = [
             GenevaOp("fragment", {"offset": "1,midsld", "in_order": False}),
         ],
         effectiveness=0.75, anti_throttle=True,
+    ),
+    # ── HTTP2_STREAM_KILL family — alpn_strip + fragmentation ───────────
+    # TSPU's HTTP2_STREAM_KILL fires only when ALPN negotiates h2. Stripping
+    # h2/h2c at the TLS layer forces HTTP/1.1, which TSPU does not stream-
+    # kill. Combined with a fragmentation pass for SNI hiding.
+    GenevaStrategy(
+        name="ru_h2downgrade_disorder",
+        desc="ALPN strip h2 -> HTTP/1.1 + out-of-order fragments (Discord, YouTube watch)",
+        country="ru", dpi_type="tspu",
+        ops=[
+            GenevaOp("alpn_modify", {"strip": "h2,h2c"}),
+            GenevaOp("fragment", {"offset": "1,midsld", "in_order": False}),
+        ],
+        effectiveness=0.8,
+    ),
+    GenevaStrategy(
+        name="ru_h2downgrade_split568",
+        desc="ALPN strip h2 + multisplit @568 + disorder (per-host warm-pool default)",
+        country="ru", dpi_type="tspu",
+        ops=[
+            GenevaOp("alpn_modify", {"strip": "h2,h2c"}),
+            GenevaOp("fragment", {"offset": "1", "in_order": True, "seqovl": 568}),
+            GenevaOp("fragment", {"offset": "1,midsld", "in_order": False}),
+        ],
+        effectiveness=0.82,
+    ),
+    GenevaStrategy(
+        name="ru_h2downgrade_flood",
+        desc="ALPN strip h2 + 4KB overlap (anti-throttle for HTTP/1.1 long downloads)",
+        country="ru", dpi_type="tspu",
+        ops=[
+            GenevaOp("alpn_modify", {"strip": "h2,h2c"}),
+            GenevaOp("fragment", {"offset": "1", "in_order": True, "seqovl": 4096}),
+            GenevaOp("fragment", {"offset": "1,midsld", "in_order": False}),
+        ],
+        effectiveness=0.78, anti_throttle=True,
     ),
     GenevaStrategy(
         name="ru_inject_fragment",
@@ -678,5 +730,17 @@ def _flags_to_ops(flags: list[str]) -> list[GenevaOp]:
                 if p.startswith("wsize="):
                     ops.append(GenevaOp("tamper", {"field": "tcp_window", "value": p[6:]}))
                     break
+
+        elif func == "alpn_strip":
+            params = {"strip": "h2,h2c"}
+            for p in parts[1:]:
+                if p.startswith("strip="):
+                    params["strip"] = p[6:]
+                elif p.startswith("keep_min="):
+                    try:
+                        params["keep_min"] = int(p[9:])
+                    except ValueError:
+                        pass
+            ops.append(GenevaOp("alpn_modify", params))
 
     return ops
