@@ -13,7 +13,7 @@ from typing import Optional
 
 logger = logging.getLogger("svoboda.analytics")
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS schema_version (
@@ -83,6 +83,24 @@ CREATE INDEX IF NOT EXISTS idx_test_results_host ON test_results(host);
 CREATE INDEX IF NOT EXISTS idx_test_results_host_time ON test_results(host, tested_at);
 CREATE INDEX IF NOT EXISTS idx_sync_queue_pending ON sync_queue(synced) WHERE synced = 0;
 CREATE INDEX IF NOT EXISTS idx_strategies_isp ON strategies(isp);
+
+-- v3: Probe history for SMART layer 1 (Active Probe Eye).
+-- Continuous active probing every ~30s captures throughput/TTFB baseline
+-- so the Anomaly Detector (layer 4) can spot TSPU updates BEFORE they
+-- become user-visible failures. Keep light: ts as REAL (unix epoch),
+-- not ISO strings, so range queries on the index are fast.
+CREATE TABLE IF NOT EXISTS probe_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,                  -- unix epoch seconds (UTC)
+    host TEXT NOT NULL,
+    success INTEGER NOT NULL,          -- 0 or 1 (usable, not just HTTP-OK)
+    throughput_kbps REAL DEFAULT 0,
+    ttfb_ms REAL DEFAULT 0,
+    http_code INTEGER DEFAULT 0,
+    strategy_id TEXT DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_probe_host_ts ON probe_history(host, ts);
 """
 
 
@@ -422,6 +440,122 @@ class Analytics:
             )
             self._conn.commit()
 
+    # ─── Probe Eye (SMART layer 1) ─────────────────────────────────────────
+
+    def log_probe(
+        self,
+        host: str,
+        success: bool,
+        throughput_kbps: float = 0.0,
+        ttfb_ms: float = 0.0,
+        http_code: int = 0,
+        strategy_id: str = "",
+    ) -> None:
+        """Record one probe sample (called every ~30s per host)."""
+        try:
+            with self._lock:
+                self._conn.execute(
+                    """INSERT INTO probe_history
+                       (ts, host, success, throughput_kbps, ttfb_ms, http_code, strategy_id)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (datetime.now(timezone.utc).timestamp(), host, int(success),
+                     float(throughput_kbps), float(ttfb_ms), int(http_code), strategy_id),
+                )
+                self._conn.commit()
+        except Exception as exc:
+            logger.debug("Failed to log probe: %s", exc)
+
+    def get_probe_baseline(self, host: str, window_sec: int = 3600) -> dict:
+        """Compute rolling-window baseline for a host.
+
+        Returns:
+            {
+                "samples": int,                # how many probes in window
+                "throughput_mean_kbps": float, # mean of successful samples
+                "throughput_stddev_kbps": float,
+                "ttfb_mean_ms": float,
+                "ttfb_stddev_ms": float,
+                "success_rate": float,         # 0..1
+            }
+        Returns zero-filled dict if no samples in window.
+        """
+        cutoff = datetime.now(timezone.utc).timestamp() - window_sec
+        with self._lock:
+            cursor = self._conn.execute(
+                """SELECT success, throughput_kbps, ttfb_ms
+                   FROM probe_history
+                   WHERE host = ? AND ts >= ?""",
+                (host, cutoff),
+            )
+            rows = cursor.fetchall()
+
+        n = len(rows)
+        if n == 0:
+            return {
+                "samples": 0, "throughput_mean_kbps": 0.0, "throughput_stddev_kbps": 0.0,
+                "ttfb_mean_ms": 0.0, "ttfb_stddev_ms": 0.0, "success_rate": 0.0,
+            }
+
+        ok_throughputs = [r[1] for r in rows if r[0] and r[1] > 0]
+        ok_ttfbs = [r[2] for r in rows if r[0] and r[2] > 0]
+        success_rate = sum(1 for r in rows if r[0]) / n
+
+        def _mean_stddev(xs: list[float]) -> tuple[float, float]:
+            if not xs:
+                return 0.0, 0.0
+            m = sum(xs) / len(xs)
+            if len(xs) < 2:
+                return m, 0.0
+            var = sum((x - m) ** 2 for x in xs) / (len(xs) - 1)
+            return m, var ** 0.5
+
+        tp_m, tp_sd = _mean_stddev(ok_throughputs)
+        tt_m, tt_sd = _mean_stddev(ok_ttfbs)
+        return {
+            "samples": n,
+            "throughput_mean_kbps": round(tp_m, 1),
+            "throughput_stddev_kbps": round(tp_sd, 1),
+            "ttfb_mean_ms": round(tt_m, 1),
+            "ttfb_stddev_ms": round(tt_sd, 1),
+            "success_rate": round(success_rate, 3),
+        }
+
+    def is_throughput_anomaly(
+        self, host: str, current_kbps: float,
+        window_sec: int = 3600, sigma_threshold: float = 2.0,
+        min_samples: int = 10,
+    ) -> bool:
+        """Return True if current_kbps is suspiciously low vs rolling baseline.
+
+        Uses one-sided z-test: only flags DROPS, not improvements.
+        Requires at least min_samples in the window — too few, return False
+        (we don't know what normal looks like yet).
+        """
+        baseline = self.get_probe_baseline(host, window_sec)
+        if baseline["samples"] < min_samples:
+            return False
+        mean = baseline["throughput_mean_kbps"]
+        sd = baseline["throughput_stddev_kbps"]
+        if mean <= 0 or sd <= 0:
+            return False
+        # current_kbps is anomalously low if it's mean - sigma_threshold*sd or worse
+        threshold = mean - sigma_threshold * sd
+        return current_kbps < threshold
+
+    def purge_old_probes(self, keep_hours: int = 24) -> int:
+        """Delete probe_history rows older than keep_hours. Returns count deleted."""
+        cutoff = datetime.now(timezone.utc).timestamp() - keep_hours * 3600
+        try:
+            with self._lock:
+                cursor = self._conn.execute(
+                    "DELETE FROM probe_history WHERE ts < ?", (cutoff,),
+                )
+                self._conn.commit()
+                return cursor.rowcount
+        except Exception as exc:
+            logger.debug("Failed to purge probes: %s", exc)
+            return 0
+
     def _init_schema(self) -> None:
         """Initialize DB schema with migrations."""
         self._conn.executescript(_SCHEMA_SQL)
@@ -433,6 +567,8 @@ class Analytics:
         # Run migrations
         if current < 2:
             self._migrate_v2()
+        # v3: probe_history table — created idempotently above via
+        # CREATE TABLE IF NOT EXISTS in _SCHEMA_SQL, no extra DDL needed.
 
         if current < SCHEMA_VERSION:
             self._conn.execute(

@@ -277,6 +277,97 @@ FREE и SUPPORTER не стоят ничего в AI (своя модель).
 4. **Cloudflare Worker relay** — развернуть для дополнительного обхода
 5. **Dashboard** — веб-панель для мониторинга пользователей и стратегий
 
+## SMART Architecture Plan (2026-05-03) — 6 слоёв интеллекта
+
+Цель: превратить инструмент из "статической стратегии + реактивный recovery"
+в **живую обучающуюся систему**. Постоянно слушать, постоянно искать
+лучшее, передавать знание между хостами, предсказывать TSPU-обновления.
+
+### Слой 1: Active Probe Eye (нервная система) ← В РАБОТЕ
+**Background thread**, каждые 30 сек микро-пинг каждого test_host.
+Метрики per-probe: throughput KB/s, TTFB ms, success.
+Persists в `probe_history` SQLite таблицу.
+Foundation для всего остального — без неё мы слепы.
+- [ ] Schema `probe_history(ts, host, success, throughput_kbps, ttfb_ms, http_code, strategy_id)`
+- [ ] `analytics.log_probe()` + `get_probe_baseline(host, window=3600s)` + `is_anomaly(host, val)`
+- [ ] Новый модуль `brain/probe_eye.py` с `ProbeEye` thread'ом
+- [ ] Hook в `_unified_watchdog` рядом с winws2_health_monitor
+- [ ] Auto-purge старых записей (keep 24h)
+- [ ] Unit-тесты на rolling baseline math
+
+### Слой 2: Pattern Transfer Engine (обобщение)
+"discord.com TLS_INTERFERENCE решён tls_morph_pad2k_split" → автоматически
+эта же стратегия применяется ко **всем** хостам того же block_type без
+повторного solve. Самый дешёвый intelligence multiplier.
+- [ ] `brain/pattern_transfer.py` — мап (ISP, block_type) → top-2 strategies
+- [ ] При solve победителя — записать в pattern map
+- [ ] При новом блок-классе — instant warm pool из pattern map (без shadow tester)
+- [ ] Per-strategy success counter — patterns "зарабатывают" доверие
+
+### Слой 3: Background Shadow Lab (всегда тестит альтернативы)
+Постоянно работает второй shadow winws2 (отдельная mutex group).
+Тестирует кандидатов из community sync + GA + Geneva на проблемных хостах.
+Промотит победителей в warm pool **до** того как они нужны.
+- [ ] `brain/shadow_lab.py` — daemon thread с приоритетной очередью кандидатов
+- [ ] Источники кандидатов: sync.pull / GA next-gen / Geneva mutate / pattern_transfer
+- [ ] Promote: если кандидат >current на 0.15 fitness → swap в warm pool[0]
+- [ ] Rate-limit: не больше 1 теста/2мин чтобы не перегружать сеть
+
+### Слой 4: Anomaly Detector (паранойя — TSPU update)
+Tracks rolling baseline per-host. Single drop = норма. Multi-host
+synchronized drop = TSPU обновился — preemptive cascade ДО юзерской жалобы.
+- [ ] `brain/anomaly_detector.py` — реагирует на сигналы probe_eye
+- [ ] Алгоритм: 3+ хоста <baseline-2σ за 5 мин → TSPU update event
+- [ ] Block-type specific: все HTTP2_STREAM_KILL хосты упали одновременно → новая h2-detection signature
+- [ ] Trigger: forced re-classify + warm pool failover + GA generation
+
+### Слой 5: Adaptive Rotation Timing (ритм — undercut TSPU)
+Замер: сколько живёт current стратегия до re-block.
+- Стабильно 8 мин → rotate каждые 7 (на минуту раньше TSPU)
+- Стабильно >1 час → rotation off
+- Хаотично → удвоить pool diversity
+- [ ] `brain/rotation_timer.py` — рассчитывает next-rotate из истории
+- [ ] Hook в watchdog: instead of fixed 5-min, использовать calculated value
+- [ ] Per-host: разный ритм для разных block_type (h2_kill быстрее чем sni)
+
+### Слой 6: Federated Meta-Learning (коллективный мозг — server-side)
+Сервер агрегирует статистику от всех клиентов: какие стратегии работают
+на каком (ISP, region, time_of_day, block_type) сейчас.
+- [ ] Server-side aggregation endpoint (требует server work)
+- [ ] Client: расширенная telemetry — block_type + throughput + duration
+- [ ] Pull priority: новый юзер на ISP X получает top-5 для X instantly
+- [ ] Detect TSPU update event globally → push новых стратегий всем
+
+### Архитектура связей слоёв
+
+```
+            ┌── Active Probe Eye (1) ──┐  каждые 30 сек throughput+TTFB
+            │                          │
+            ▼                          ▼
+   ┌──────────────┐            ┌────────────────┐
+   │ Anomaly (4)  │ drift>2σ   │ Shadow Lab (3) │
+   │ Detector     │ ► cascade  │ background ALT │
+   └──────────────┘            │ tests + GA     │
+                               └────────┬───────┘
+                                        │ promote
+                                        ▼
+                               ┌────────────────┐
+                               │  Warm Pool     │ ◄── Pattern Transfer (2)
+                               │  per host/type │     same family auto-apply
+                               └────────┬───────┘
+                                        │
+                          ┌─────────────┴────────────┐
+                          ▼                          ▼
+                   Adaptive Rotation (5)      Federated Meta (6)
+                   ритм TSPU                  global learning
+```
+
+### Минимум-жизнеспособный SMART
+**Слои 1+2+3 = 4-7 дней работы.** Это уже фундаментальный сдвиг от
+"статика" к "живая система". Слои 4-6 — поверх.
+
+---
+
 ## Последние исправления (2026-03-26)
 
 ### Сервер (api.py)

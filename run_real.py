@@ -1217,6 +1217,25 @@ def main():
         )
         _health_thread.start()
 
+        # ─── SMART layer 1: Active Probe Eye ────────────────────────────
+        # Continuous lightweight probing every 30s feeds throughput/TTFB
+        # samples into analytics.probe_history. Anomaly Detector (layer 4)
+        # reads this baseline to spot TSPU updates BEFORE the user notices
+        # "site stopped working". ProbeEye is read-only — never triggers
+        # recovery itself; that's the watchdog's job.
+        _probe_eye = None
+        try:
+            from brain.probe_eye import ProbeEye
+            _probe_eye = ProbeEye(
+                analytics=analytics,
+                hosts=hosts,
+                probe_fn=_curl_check_one,
+                strategy_id_fn=lambda: _wd_sid,
+            )
+            _probe_eye.start()
+        except Exception as _pe_exc:
+            logger.warning("ProbeEye failed to start: %s", _pe_exc)
+
         while _running:
             for _ in range(_wd_interval):
                 if not _running:

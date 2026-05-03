@@ -207,5 +207,117 @@ class TestAnalyticsDB(unittest.TestCase):
         self.assertGreater(stats["total_strategies"], 0)
 
 
+class TestProbeEye(unittest.TestCase):
+    """SMART layer 1: probe history rolling baseline + anomaly detection."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.config = {"_base_dir": self.tmpdir, "analytics_db_path": "test_probe.db"}
+        self.analytics = Analytics(self.config)
+
+    def tearDown(self):
+        self.analytics.close()
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_probe_history_table_exists(self):
+        """v3 schema: probe_history table created."""
+        cursor = self.analytics._conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='probe_history'"
+        )
+        self.assertIsNotNone(cursor.fetchone())
+
+    def test_log_probe_persists(self):
+        """log_probe should insert a row recoverable by baseline query."""
+        self.analytics.log_probe(
+            host="example.com", success=True,
+            throughput_kbps=120.5, ttfb_ms=85.0, http_code=200,
+            strategy_id="abc",
+        )
+        baseline = self.analytics.get_probe_baseline("example.com", window_sec=3600)
+        self.assertEqual(baseline["samples"], 1)
+        self.assertAlmostEqual(baseline["throughput_mean_kbps"], 120.5, places=1)
+
+    def test_get_probe_baseline_empty(self):
+        """No samples → zero-filled dict, not crash."""
+        baseline = self.analytics.get_probe_baseline("nothere.com")
+        self.assertEqual(baseline["samples"], 0)
+        self.assertEqual(baseline["throughput_mean_kbps"], 0.0)
+        self.assertEqual(baseline["success_rate"], 0.0)
+
+    def test_baseline_mean_and_stddev(self):
+        """Baseline stats correct over multiple samples."""
+        # 5 successful probes with throughputs 100, 110, 120, 130, 140 KB/s
+        # mean = 120, sample stddev = sqrt(((100-120)^2 + ... + (140-120)^2)/4) = ~15.81
+        for tp in [100, 110, 120, 130, 140]:
+            self.analytics.log_probe("multi.com", success=True, throughput_kbps=tp,
+                                     ttfb_ms=50.0, http_code=200)
+        b = self.analytics.get_probe_baseline("multi.com")
+        self.assertEqual(b["samples"], 5)
+        self.assertAlmostEqual(b["throughput_mean_kbps"], 120.0, places=1)
+        self.assertAlmostEqual(b["throughput_stddev_kbps"], 15.8, places=1)
+        self.assertEqual(b["success_rate"], 1.0)
+
+    def test_baseline_excludes_other_hosts(self):
+        """get_probe_baseline filters by host."""
+        self.analytics.log_probe("a.com", success=True, throughput_kbps=100)
+        self.analytics.log_probe("b.com", success=True, throughput_kbps=999)
+        b = self.analytics.get_probe_baseline("a.com")
+        self.assertEqual(b["samples"], 1)
+        self.assertAlmostEqual(b["throughput_mean_kbps"], 100.0, places=1)
+
+    def test_anomaly_detection_drop(self):
+        """current_kbps far below baseline → True (anomaly)."""
+        # Build baseline of ~120 KB/s with low variance
+        for _ in range(15):
+            self.analytics.log_probe("anom.com", success=True, throughput_kbps=120.0)
+        # 5 KB/s is way below mean - 2*stddev (stddev=0 here, so any drop counts)
+        # But stddev=0 → method returns False (can't compute z). Add some variance.
+        for tp in [100, 110, 130, 140]:
+            self.analytics.log_probe("anom.com", success=True, throughput_kbps=tp)
+        # Now mean ~118, stddev ~12. Threshold (2σ) = ~94.
+        # 50 KB/s should be flagged anomaly
+        self.assertTrue(self.analytics.is_throughput_anomaly("anom.com", 50.0))
+        # 110 KB/s within normal range
+        self.assertFalse(self.analytics.is_throughput_anomaly("anom.com", 110.0))
+
+    def test_anomaly_detection_too_few_samples(self):
+        """min_samples not met → False (don't know baseline yet)."""
+        for _ in range(3):
+            self.analytics.log_probe("new.com", success=True, throughput_kbps=100)
+        # Default min_samples=10, only 3 samples → False even for very low value
+        self.assertFalse(self.analytics.is_throughput_anomaly("new.com", 1.0))
+
+    def test_anomaly_ignores_improvements(self):
+        """One-sided test: faster-than-baseline is NOT anomaly."""
+        for _ in range(10):
+            self.analytics.log_probe("fast.com", success=True, throughput_kbps=50.0)
+        # Add some variance so stddev > 0
+        for tp in [40, 45, 55, 60]:
+            self.analytics.log_probe("fast.com", success=True, throughput_kbps=tp)
+        # 500 KB/s is way ABOVE baseline — should NOT be anomaly (only drops are)
+        self.assertFalse(self.analytics.is_throughput_anomaly("fast.com", 500.0))
+
+    def test_purge_old_probes(self):
+        """purge_old_probes removes rows older than keep_hours."""
+        # Insert a recent probe (will survive)
+        self.analytics.log_probe("keep.com", success=True, throughput_kbps=100)
+        # Manually insert an old row (25h ago) directly
+        from datetime import datetime, timezone
+        old_ts = datetime.now(timezone.utc).timestamp() - 25 * 3600
+        with self.analytics._lock:
+            self.analytics._conn.execute(
+                "INSERT INTO probe_history (ts, host, success, throughput_kbps) "
+                "VALUES (?, ?, ?, ?)",
+                (old_ts, "keep.com", 1, 50.0),
+            )
+            self.analytics._conn.commit()
+        deleted = self.analytics.purge_old_probes(keep_hours=24)
+        self.assertEqual(deleted, 1)
+        # Recent one survives
+        b = self.analytics.get_probe_baseline("keep.com")
+        self.assertEqual(b["samples"], 1)
+
+
 if __name__ == "__main__":
     unittest.main()
