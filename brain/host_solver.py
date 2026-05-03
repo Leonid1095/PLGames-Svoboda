@@ -29,11 +29,19 @@ logger = logging.getLogger("svoboda.host_solver")
 # top of the candidate list so we try the targeted fix first.
 # Empty/unknown block_type → no hoisting, default priority order applies.
 BLOCK_TYPE_TAGS: dict[str, str] = {
+    # h2_downgrade family targets HTTP/2 stream-kill specifically by
+    # stripping the h2 protocol from the ClientHello ALPN extension via
+    # our alpn_strip lua primitive. Forces server to fall back to HTTP/1.1
+    # which TSPU's HTTP2_STREAM_KILL signature does not match.
     "HTTP2_STREAM_KILL": "h2_downgrade",
-    # TLS_INTERFERENCE → tls_morph: pure-local TLS payload obfuscation
-    # (RFC 7685 padding + extension reorder + GREASE) overflows TSPU's
-    # stateful parser when desync alone fails. No tunnel needed.
-    "TLS_INTERFERENCE": "tls_morph",
+    # discord_2026_proven family is the in-the-wild Flowseal v1.9.7 +
+    # community-7-position-disorder set ported to zapret2 lua. These
+    # are the strategies actually keeping Discord working in 2026 on TSPU
+    # ISPs. Hoist them to the top whenever classifier marks Discord-style
+    # blocking (TLS_INTERFERENCE was the live observation; same family
+    # also helps HTTP2_STREAM_KILL because it kills the SNI before TSPU
+    # can classify the connection at all).
+    "TLS_INTERFERENCE": "discord_2026_proven",
     # Future: SNI_FILTER → "fake_hello_inject", THROTTLING → "anti_throttle"
 }
 

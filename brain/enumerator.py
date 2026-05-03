@@ -92,6 +92,55 @@ KNOWN_STRATEGIES: list[dict] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
+    # TIER 0.3: FLOWSEAL v1.9.7 (Feb 2026) — proven-in-the-wild for Discord/YT
+    # Ported from Flowseal/zapret-discord-youtube release 1.9.7 (23.02.2026).
+    # These are no-fake variants (ALT6/general profiles) that work on TSPU
+    # ISPs without triggering fake-packet detection. seqovl_pattern uses our
+    # fake_default_tls blob (equivalent to their tls_clienthello_*.bin files).
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "flowseal_v197_alt6_split681_pat",
+        "flags": [
+            "multisplit:pos=1:seqovl=681:seqovl_pattern=fake_default_tls",
+        ],
+        "desc": "Flowseal v1.9.7 ALT6: split@681 + fake_tls seqovl pattern (Discord+YT proven)",
+        "tags": ["discord_2026_proven", "h2_downgrade", "per_host"],
+    },
+    {
+        "name": "flowseal_v197_general_split568_pat",
+        "flags": [
+            "multisplit:pos=1:seqovl=568:seqovl_pattern=fake_default_tls",
+        ],
+        "desc": "Flowseal v1.9.7 general: split@568 + fake_tls seqovl pattern",
+        "tags": ["discord_2026_proven", "per_host"],
+    },
+    {
+        "name": "discord_multidisorder_7pos",
+        "flags": [
+            "multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1",
+        ],
+        "desc": "Discord 7-position multidisorder (community-proven for TSPU TLS_INTERFERENCE)",
+        "tags": ["discord_2026_proven", "per_host"],
+    },
+    {
+        "name": "discord_disorder_pat_7pos",
+        "flags": [
+            "multidisorder:pos=1,sniext+1,host+1,midsld-2,midsld,midsld+2,endhost-1:seqovl=568:seqovl_pattern=fake_default_tls",
+        ],
+        "desc": "Discord 7-pos disorder + fake_tls seqovl@568 (combo)",
+        "tags": ["discord_2026_proven", "per_host"],
+    },
+    {
+        "name": "flowseal_v197_hostfakesplit_yaru",
+        "flags": [
+            "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ts_up:repeats=4:tls_mod=rnd,dupsid,sni=ya.ru",
+            "hostfakesplit:host=ya.ru,altorder=1",
+        ],
+        "desc": "Flowseal v1.9.7 ALT3: hostfakesplit with ya.ru SNI/host spoof",
+        "tags": ["discord_2026_proven", "per_host"],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
     # TIER 0.5: H2 DOWNGRADE FAMILY (for HTTP2_STREAM_KILL hosts)
     # TSPU lets the TLS handshake complete, then kills the H/2 stream
     # after a few KB (Discord, YouTube watch-pages, others). Pure desync
