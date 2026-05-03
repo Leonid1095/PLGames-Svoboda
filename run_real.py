@@ -1690,7 +1690,11 @@ def main():
                 test_history=[r.to_dict() for r in ai_feedback.history[-10:]],
                 excluded_functions=list(ai_feedback.get_excluded_functions()),
                 warm_pool=_warm_pool_snapshot,
-                active_morpher=_wd_morpher_profile or "",
+                # AI engine runs BEFORE _unified_watchdog defines _wd_morpher_profile,
+                # so we can't reference the watchdog-scope variable here. Use the
+                # config default as the active profile — at this point in startup
+                # nothing has rotated yet, so config value is correct.
+                active_morpher=config.get("morphing_profile", "chrome_win") if config else "chrome_win",
             )
 
             engine = AIEngine(
