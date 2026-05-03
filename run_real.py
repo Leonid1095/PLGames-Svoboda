@@ -1431,7 +1431,14 @@ def main():
                             # Pool exhausted — fall through to full re-solve
                             ui.info(f"{fh}: warm pool exhausted, full re-solve")
                         ui.step(f"Solving: {fh}")
-                        sr = solver.solve(fh, isp=isp_name)
+                        # Pass block_type from the cascade-level classifier dict
+                        # so solver hoists matching-tag strategies (h2_downgrade
+                        # for HTTP2_STREAM_KILL, tls_morph for TLS_INTERFERENCE).
+                        # Without this, solver walks the default 70-strategy list
+                        # in priority order and may miss the targeted family
+                        # entirely if a generic Tier-0 happens to score high.
+                        bt = blocked[fh].block_type if blocked.get(fh) else ""
+                        sr = solver.solve(fh, isp=isp_name, block_type=bt)
                         if sr:
                             ui.ok(f"{fh}: fitness={sr.fitness:.3f}")
                             solved = True
@@ -1892,7 +1899,8 @@ def main():
                                     if not _running:
                                         break
                                     print(f"\n  Solving: {fh}...")
-                                    result = solver.solve(fh, isp=isp_name)
+                                    bt = blocked[fh].block_type if blocked.get(fh) else ""
+                                    result = solver.solve(fh, isp=isp_name, block_type=bt)
                                     if result:
                                         print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
                                         any_solved = True
@@ -2086,9 +2094,10 @@ def main():
                 print(f"  Tier:     {tier.get_status_line()}")
                 print(f"  Donate:   {donate.page_url}")
 
-                # Immediately solve failed hosts (skip TLS_INTERFERENCE — desync can't help)
-                failed_hosts = [h for h, ok in verify.items() if not ok
-                                and (h not in blocked or blocked[h].block_type != "TLS_INTERFERENCE")]
+                # Immediately solve failed hosts. TLS_INTERFERENCE used to be
+                # excluded ("desync can't help") but now we have local
+                # tls_pad/tls_morph primitives that DO target this — include them.
+                failed_hosts = [h for h, ok in verify.items() if not ok]
                 if failed_hosts and _running:
                     from brain.host_solver import HostSolver
                     # Stop permanent zapret — shadow tester needs exclusive WinDivert
@@ -2100,7 +2109,10 @@ def main():
                             if not _running:
                                 break
                             print(f"\n  Solving: {fh}...")
-                            result = solver.solve(fh, isp=isp_name)
+                            # Pass block_type so tls_morph / h2_downgrade family
+                            # is hoisted by the dispatcher when applicable
+                            bt = blocked[fh].block_type if blocked.get(fh) else ""
+                            result = solver.solve(fh, isp=isp_name, block_type=bt)
                             if result:
                                 print(f"  [OK] Found strategy for {fh} (fitness={result.fitness:.3f})")
                             else:

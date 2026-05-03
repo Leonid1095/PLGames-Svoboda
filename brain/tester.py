@@ -164,12 +164,21 @@ class ConnectionTester:
         try:
             timeout = self._evo_timeout
             r = self._curl_test(host, timeout_override=timeout)
+            # Throttled = formal HTTP 200 but latency >threshold (default 3s).
+            # Treat as low-fitness, NOT full success: otherwise solver stores
+            # a "working" strategy that delivers 8-10 second responses to the
+            # user and never tries the targeted family (alpn_strip / tls_pad).
+            # 0.2 is below POOL_THRESHOLD (0.5) so the strategy won't enter
+            # the warm pool, and solver continues exploring.
+            if r.success and r.error_type == "throttled":
+                logger.info("Single-host test %s: THROTTLED (%dms) → fitness 0.2",
+                            host, r.latency_ms)
+                return 0.2
             if r.success:
                 logger.info("Single-host test %s: OK (%dms)", host, r.latency_ms)
                 return 1.0
-            else:
-                logger.debug("Single-host test %s: FAIL (%s)", host, r.error_type)
-                return 0.0
+            logger.debug("Single-host test %s: FAIL (%s)", host, r.error_type)
+            return 0.0
         finally:
             self._stop_shadow_zapret()
 
