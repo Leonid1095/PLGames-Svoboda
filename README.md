@@ -1,184 +1,341 @@
 <div align="center">
 
-# PLGames Svoboda
+# 🌐 PLGames Svoboda
 
 ### Autonomous DPI Bypass Agent
 
-**Your internet -- your rules. AI-powered, self-adapting, community-driven.**
+**Your internet — your rules.** AI-powered, self-adapting, community-driven.<br>
+No VPN tunnel. No proxy server. Pure local packet manipulation.
 
-[Download](#-quick-start) | [How it works](#how-it-works) | [Support](#-support-the-project)
+[Download](#-quick-start) · [How it works](#-the-smart-bypass-chain) · [Roadmap](#-roadmap) · [Support](#-support-the-project)
 
----
+<br>
 
-<img src="https://img.shields.io/badge/Platform-Windows-blue?style=for-the-badge&logo=windows" alt="Windows">
-<img src="https://img.shields.io/badge/Engine-zapret2-green?style=for-the-badge" alt="zapret2">
-<img src="https://img.shields.io/badge/AI-Powered-purple?style=for-the-badge" alt="AI">
-<img src="https://img.shields.io/badge/Tests-110%20passed-brightgreen?style=for-the-badge" alt="Tests">
-<img src="https://img.shields.io/badge/License-MIT-yellow?style=for-the-badge" alt="MIT">
+![Platform](https://img.shields.io/badge/Platform-Windows%2010%2B-0078D4?style=for-the-badge&logo=windows)
+![Engine](https://img.shields.io/badge/Engine-zapret2%20%2B%20WinDivert-2EA44F?style=for-the-badge)
+![AI](https://img.shields.io/badge/AI-Strategy%20Engineer-8B5CF6?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-184%20passing-brightgreen?style=for-the-badge)
+![License](https://img.shields.io/badge/License-MIT-EAB308?style=for-the-badge)
 
 </div>
 
 ---
 
-## What is this?
+## 🇷🇺 Кратко по-русски
 
-Svoboda is an **autonomous agent** that detects internet censorship on your connection and bypasses it -- without any manual configuration.
+**PLGames Svoboda** — автономный агент, который сам обходит блокировки в РФ.<br>
+Запускаешь — он определяет провайдера, тип блокировки, подбирает рабочую стратегию обхода, применяет её и круглосуточно следит за работой. Если ТСПУ меняет правила — переподстраивается за секунды.
 
-You launch it. It figures out your ISP, identifies how the DPI blocks traffic, finds a working bypass strategy, applies it, and monitors 24/7. If censorship changes -- it re-adapts automatically.
+**Это НЕ VPN.** Никаких туннелей, своих серверов или подмены IP. Только локальная манипуляция пакетами на уровне ядра Windows. Сервер используется только как «коллективный мозг» — клиенты делятся друг с другом рабочими стратегиями.
 
-## What it unblocks
-
-YouTube, Discord, Twitter/X, Instagram, Facebook, Telegram, LinkedIn, Reddit, Medium -- and everything else blocked by SNI filtering in Russia. Verified on **13 major platforms** with full page load + body content verification.
-
-## How is it different?
-
-| | Svoboda | GoodbyeDPI | Zapret GUI | ByeDPI |
-|---|:---:|:---:|:---:|:---:|
-| Auto-detects ISP + DPI type | Yes | No | No | No |
-| Finds strategy automatically | Yes | No | No | No |
-| Community intelligence | Yes | No | No | No |
-| Self-adapts when DPI changes | Yes | No | No | No |
-| Blocks QUIC automatically | Yes | No | No | No |
-| Verifies with body content check | Yes | No | No | No |
-| 81,000+ domain blocklist | Yes | No | No | No |
-
-Other tools give you a config file. Svoboda **is** the config file -- it writes itself.
-
-## How it works
-
-```
-Launch (admin)
-  |
-  +-- Detect ISP (AS number, DPI type, hop distance)
-  +-- Block QUIC via firewall (forces TCP where desync works)
-  +-- Try cached strategy from community (5 sec)
-  |     |
-  |     +-- Works? --> Apply + Monitor
-  |     +-- Stale? --> Fast enumeration
-  |
-  +-- Enumerate 62+ proven strategies (10-30 sec)
-  |     |
-  |     +-- Test each with real connections
-  |     +-- Follow redirects, verify body (>512B = real page)
-  |     +-- First strategy above threshold --> Apply
-  |
-  +-- Monitor 24/7
-  |     |
-  |     +-- Health check every 1-5 min (adaptive interval)
-  |     +-- Network change detection (WiFi/mobile switch)
-  |     +-- Auto-recovery on degradation
-  |
-  +-- Share working strategy with community
-        |
-        +-- Next user on same ISP gets it instantly
-```
-
-### Under the hood
-
-- **62+ no-fake strategies** -- TSPU blocks fake packets, so we use pure packet splitting/reordering (multisplit, multidisorder, seqovl patterns)
-- **QUIC firewall block** -- browsers prefer QUIC (UDP 443) which TSPU blocks. We force TCP fallback where desync works. Removed on exit.
-- **Browser-like verification** -- follows redirects (-L), checks body size, tests www.youtube.com (not just youtube.com). A 200 OK with <512 bytes = block page, not success.
-- **Per-host solver** -- if YouTube works but Discord doesn't, finds a separate strategy for Discord
-- **Adaptive watchdog** -- 1 min checks after failure, 10 min when stable
-- **Thread-safe** -- mutex on winws2 start/stop, PID-targeted process kill, SQLite locking
-
-## Quick Start
-
-```
+```cmd
 git clone https://github.com/Leonid1095/PLGames-Svoboda.git
 cd PLGames-Svoboda
 pip install -r requirements.txt
 run.bat
 ```
 
-**Requirements:** Windows 10+, Python 3.11+, Administrator rights
+---
 
-## Internet broken?
+## What is this?
 
-If something went wrong:
+Svoboda is an **autonomous bypass agent**, not a VPN. There's no tunnel, no proxy server, no shared IP. Everything happens locally on your machine through kernel-level packet manipulation (`zapret2` + `WinDivert`).
+
+You launch it. It figures out your ISP, identifies how DPI blocks traffic, finds a working bypass strategy, applies it, and monitors 24/7. When censorship changes — it re-adapts.
+
+The cloud component is **intelligence only**: clients share which strategies work on which ISPs, so the next person on the same network gets a working setup instantly.
+
+---
+
+## 🔓 What it unblocks
+
+<table>
+<tr>
+<td valign="top" width="33%">
+
+**💬 Social & Messaging**
+- Discord
+- Telegram
+- Twitter / X
+- Instagram
+- Facebook / Meta
+- LinkedIn
+- WhatsApp
+- Reddit
+
+</td>
+<td valign="top" width="33%">
+
+**🎮 Games**
+- Riot Games / League of Legends
+- Roblox
+- PlayStation Network
+- Xbox / Microsoft Store
+- Epic Games
+- EA / Origin
+- Steam Community
+- Battle.net
+- Ubisoft
+
+</td>
+<td valign="top" width="33%">
+
+**🎬 Streaming & Media**
+- YouTube (throttled → fast)
+- Netflix
+- Crunchyroll / Funimation
+- Spotify
+- Twitch
+- Disney+
+- HBO Max
+- Paramount+, Peacock
+- Hidive
+
+</td>
+</tr>
+</table>
+
+Hostlist is curated — only services genuinely blocked or throttled in RU are included, so antivirus / Steam / Office stay untouched.
+
+---
+
+## ⚡ The Smart Bypass Chain
+
+When something is blocked, Svoboda goes through **7 layers automatically**:
 
 ```
-fix_internet.bat
+┌─────────────────────────────────────────────────────────────────┐
+│  Layer 1   Community DB        another user found a strategy    │
+│            ↓ fail              for your ISP — applied in 5 sec  │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 2   Local cache         strategy that worked here before │
+│            ↓ fail                                                │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 3   AI Advisor          top-4 from learned memory        │
+│            ↓ fail              ranked by past fitness            │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 4   Enumerator          75+ hardcoded + harvested        │
+│            ↓ fail              configs from Flowseal et al      │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 5   AI Strategy Engineer LLM analyzes raw symptoms,     │
+│            ↓ fail              invents NOVEL flag combination   │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 6   ByeDPI Layer 2      SOCKS5 userspace — different     │
+│            ↓ fail              attack model than packet desync  │
+├─────────────────────────────────────────────────────────────────┤
+│  Layer 7   GA Evolution        genetic mutations of best        │
+│                                strategy found so far             │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
-Kills winws2, removes QUIC firewall rule, unloads WinDivert, clears proxy, flushes DNS.
+Once a working strategy is found, it's **monitored 24/7**, **shared anonymously** with the community DB, and **re-tested** if connectivity degrades.
 
-## Architecture
+---
+
+## 🆚 How it compares
+
+|  | **Svoboda** | GoodbyeDPI | Zapret GUI | ByeDPI | Zapret-Discord-YouTube |
+|---|:---:|:---:|:---:|:---:|:---:|
+| Auto-detects ISP + DPI type | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Self-finds working strategy | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Community strategy sync | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Live config harvesting | ✅ | ❌ | ❌ | ❌ | manual |
+| AI generates novel strategies | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Self-adapts to DPI changes | ✅ | ❌ | ❌ | ❌ | ❌ |
+| QUIC auto-block | ✅ | ❌ | partial | ❌ | partial |
+| Cross-host learning (per-ISP) | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Body-content verification | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 184-test safety harness | ✅ | ❌ | ❌ | ❌ | ❌ |
+
+> Other tools give you a config. **Svoboda *is* the config — it writes itself.**
+
+---
+
+## 🆕 What's new (May 2026)
+
+| Feature | What it does |
+|---|---|
+| **Live Strategy Harvester** | Pulls fresh `.bat` configs from `Flowseal/zapret-discord-youtube` every 6h, translates zapret v1 → v2 lua, dedupes, adds to enum pool |
+| **AI Strategy Engineer** | When all known strategies fail, sends raw symptoms (curl exit codes, latency, ISP) to LLM, parses novel flag combination, validates, tests on the fly |
+| **Pattern Transfer Engine** | Strategy that worked for `discord.com` is tried first for `cdn.discordapp.com` (cross-host learning per ISP+block_type) |
+| **ProbeEye** | Continuous active probing thread (30s interval), measures real throughput + TTFB — not just HTTP 200 OK |
+| **Block-type dispatcher** | TSPU MITM (`exit=60 SSL`) gets SNI-fragmentation first; HTTP/2 stream kill gets `alpn_strip` first |
+| **Hostlist v2** | Curated 72 actually-blocked domains (down from 81 149 garbage); 115 must-not-touch in exclude (AV, anti-cheat, critical CDNs) |
+
+---
+
+## 🚀 Quick Start
+
+```bash
+git clone https://github.com/Leonid1095/PLGames-Svoboda.git
+cd PLGames-Svoboda
+pip install -r requirements.txt
+run.bat                       # production mode (requires Administrator)
+```
+
+**Requirements**
+
+- Windows 10+ (Linux secondary, in development)
+- Python 3.11+
+- Administrator privileges (for WinDivert kernel driver)
+
+**Internet stuck?**
+
+```bash
+fix_internet.bat              # kills winws2, removes QUIC block, clears proxy, flushes DNS
+```
+
+---
+
+## 🏗️ Architecture
 
 ```
-run_real.py              -- Orchestrator (profiles, watchdog, cleanup)
+run_real.py                       Orchestrator: profiles, watchdog, cleanup, escalation chain
 brain/
-  enumerator.py          -- 62+ proven strategies, fast enumeration
-  tester.py              -- Shadow testing with body verification
-  genetic.py             -- GA evolution (when enumeration isn't enough)
-  block_classifier.py    -- Detects block type (SNI, RST, TLS, IP)
-  tspu_profiler.py       -- DPI distance, TTL, stateful detection
-  host_solver.py         -- Per-host strategy optimization
-  proxy_router.py        -- Smart routing (desync vs proxy vs tunnel)
-  analytics.py           -- Thread-safe SQLite telemetry
-  ai_engine.py           -- Autonomous AI decision-making
-  telemost_tunnel.py     -- WebRTC tunnel for whitelist scenarios
-  morpher.py             -- TLS fingerprint morphing
-  sync.py                -- Community strategy sharing
-  tier.py                -- Subscription management
-tests/                   -- 110 unit tests (security, compilation, logic)
-zapret2-v0.9.4.5/        -- DPI bypass engine (winws2 + WinDivert)
+  ├─ enumerator.py                75+ proven strategies, fast enumeration with rate-limit guard
+  ├─ strategy_harvester.py        ⭐ NEW — live config sync from Flowseal et al
+  ├─ ai_strategy_engineer.py      ⭐ NEW — LLM proposes novel strategies on enum exhaustion
+  ├─ tester.py                    Shadow testing with body verification + throughput
+  ├─ probe_eye.py                 ⭐ NEW — continuous probing, throughput/TTFB
+  ├─ pattern_transfer.py          ⭐ NEW — cross-host strategy transfer per (ISP, block_type)
+  ├─ host_solver.py               Per-host strategy optimization with hoisting
+  ├─ block_classifier.py          Detects SNI / RST / TLS_MITM / HTTP2_KILL / IP_BLOCK
+  ├─ tspu_profiler.py             DPI distance, TTL, stateful detection
+  ├─ genetic.py                   GA evolution (Geneva-style mutations)
+  ├─ byedpi.py                    Layer 2 fallback (SOCKS5 userspace desync)
+  ├─ ai_engine.py                 Autonomous agentic decision loop
+  ├─ ai_advisor.py                LLM-backed strategy ranking
+  ├─ analytics.py                 Thread-safe SQLite telemetry
+  ├─ proxy_router.py              Smart routing (desync vs proxy vs tunnel)
+  ├─ morpher.py                   TLS fingerprint morphing (Chrome / Firefox / Safari)
+  ├─ sync.py                      Community strategy sharing
+  └─ tier.py                      Subscription management
+lua/                              Custom zapret2 lua extensions (alpn_strip, tls_morph)
+server/api.py                     FastAPI intelligence layer (NOT a tunnel)
+tests/                            184 unit tests (security, compilation, logic, parsers)
+zapret2-v0.9.4.5/                 Bundled DPI bypass engine
 ```
 
-## Privacy
+---
 
-- **Zero personal data** -- no IP, MAC, hostname, or browsing history
-- **Anonymous telemetry** -- ISP type + strategy fitness score only
-- Telemetry trains the community AI to find better strategies for everyone
-- Full opt-out: `"share": false` in config.json
+## 🗺️ Roadmap
+
+### ✅ Shipped & verified live
+- 7-layer escalation chain (community → cache → AI → enum → AI Engineer → ByeDPI → GA)
+- Live Strategy Harvester (Flowseal sync, zapret v1↔v2 translator)
+- AI Strategy Engineer (LLM-as-strategy-designer with flag validation)
+- Pattern Transfer Engine (cross-host learning)
+- ProbeEye continuous probing
+- Block-type-aware strategy hoisting
+- Hostlist v2 (games + streaming + social, anti-cheat exclusions)
+- Telegram no longer auto-removed from solver test set
+- ByeDPI Layer 2 fallback wiring
+
+### 🟡 In progress
+- Discord TSPU MITM bypass (`exit=60 SSL` — SNI hiding partial; AI Engineer experiments ongoing)
+- Telegram on partial-IP-block ISPs (some IPs blackholed, others SNI-filtered)
+- Server-side hardening:
+  - Rate-limited host-strategy reports + per-host fitness validation
+  - Per-ISP strategy blocklist (mark dead strategies, stop testing them)
+  - AI proxy fallback chain (DeepSeek → primary → cache → 503)
+  - Curated hostlist endpoint (`/api/v1/hostlist/curated`)
+  - Block-type taxonomy enum (incl. `TLS_MITM_INJECTION`)
+
+### ⏳ Planned
+- **GitHub Pages landing site** — proper public-facing page with download, screenshots, FAQ
+- Anomaly Detector — detect when ISP swaps blocking method, trigger re-discovery
+- Adaptive Rotation — round-robin among top-N strategies per host
+- Federated Meta-Learning — cross-ISP strategy transfer (one ISP's solution helps another)
+- Live LLM strategy injection without restart
+- Tray UI with traffic graph + manual override
+- Mobile clients (Android via `VpnService`)
+- Linux daemon (`nfqws2` + `iptables NFQUEUE`)
+- macOS support
 
 ---
 
-## Support the project
+## 🧪 Verified live
 
-Svoboda is **fully free and open source**. All bypass features work without paying anything.
+Tested **May 2026** on **er-telecom (AS42116, Tatarstan)** with TSPU stateful DPI:
 
-Donations cover two things:
+| Platform | Status | Method | Notes |
+|---|:---:|---|---|
+| YouTube | ✅ | `multisplit:pos=1:seqovl=4096 \| multidisorder:pos=1,midsld` | full HD video, no buffering |
+| Instagram | ✅ | same | feed + DMs + stories |
+| Facebook | ✅ | same | feed + Messenger |
+| X / Twitter | 🟡 | same | works but throttled (~10s TTFB on cold connections) |
+| LinkedIn | ✅ | same | full functionality |
+| Reddit | ✅ | passthrough | not blocked here |
+| Discord | 🟡 | `multisplit:pos=1:seqovl=N` + AI Engineer | TSPU MITM injection — investigating |
+| Telegram | 🟡 | `multisplit:pos=1` + per-host solver | partial IP block on some servers |
 
-1. **AI infrastructure** -- the AI models that analyze DPI patterns and suggest strategies learn from community data. More compute = smarter AI = faster bypass discovery for everyone.
-2. **Server hosting** -- community strategy sync, domain blocklist updates, and coordination between users on the same ISP.
+✅ working · 🟡 partial / in progress · ❌ blocked
 
-That's it. No paywalls on features. The tool works the same for free and paid users. Paid tiers simply get more frequent AI analysis -- useful when your ISP changes blocking methods multiple times per day.
-
-| Tier | Price | AI analysis | Details |
-|------|-------|-------------|---------|
-| **Free** | 0 | 1x/day | Full bypass + community strategies + 62+ built-in strategies |
-| **Supporter** | 300 RUB/mo | ~12x/day | Faster AI adaptation to DPI changes |
-| **Pro** | 600 RUB/mo | ~48x/day | Priority AI + PLGames encrypted DNS (Germany) |
-
-**[Support on DonatePay](https://new.donatepay.ru/@lenya)**
-
----
-
-## Tested and verified
-
-| Platform | Status | Response | Latency |
-|----------|--------|----------|---------|
-| YouTube | Working | 200 OK, 707KB | 0.6s |
-| Instagram | Working | 200 OK, 571KB | 0.9s |
-| Facebook | Working | 200 OK, 463KB | 1.4s |
-| Discord | Working | 200 OK, 164KB | 0.4s |
-| X / Twitter | Working | 200 OK, 244KB | 0.7s |
-| Telegram Web | Working | 200 OK | 0.3s |
-| LinkedIn | Working | 200 OK, 142KB | 1.6s |
-| Reddit | Working | 200 OK | 0.4s |
-| Medium | Working | 403 (accessible) | 0.3s |
-
-Tested April 2026 on er-telecom (AS42116, Tatarstan) with TSPU stateful DPI.
+> Status updates after each live run are tracked in [`ROADMAP.md`](ROADMAP.md).
 
 ---
 
-## License
+## 🛡️ Privacy
 
-MIT -- use freely, contribute back.
+- **Zero personal data collected** — no IP, MAC, hostname, or browsing history
+- **Anonymous telemetry only** — ISP type + strategy fitness score
+- Telemetry trains the community AI to discover better strategies for everyone
+- All API keys server-side, never embedded in client
+- Full opt-out: set `"share": false` in `config.json`
+- Server is intelligence only — **never** routes your traffic
+
+---
+
+## 💛 Support the project
+
+Svoboda is **fully free and open source**. Every bypass feature works without paying anything.
+
+Donations cover:
+
+1. **AI infrastructure** — LLMs that analyze DPI patterns and suggest strategies. More compute = smarter AI = faster bypass discovery for everyone.
+2. **Server hosting** — community strategy sync, hostlist updates, ISP coordination.
+
+No paywalls. The tool is identical for free and paid users. Paid tiers just get faster AI analysis — useful when your ISP changes blocking methods multiple times per day.
+
+| Tier | Price | AI analysis | Includes |
+|---|:---:|:---:|---|
+| **Free** | 0₽ | 1×/day | Full bypass + 75+ built-in strategies + community sync |
+| **Supporter** | 300₽/mo | ~12×/day | Faster AI adaptation when DPI rules shift |
+| **Pro** | 600₽/mo | ~48×/day | Priority AI + PLGames encrypted DNS (Germany DoH/DoT) |
+
+[**Support on DonatePay →**](https://new.donatepay.ru/@lenya)
+
+---
+
+## 🤝 Contributing
+
+PRs welcome. Before submitting:
+
+```bash
+python -m pytest tests/ -v                                       # all 184 tests must pass
+python -c "import py_compile; py_compile.compile('run_real.py', doraise=True)"   # syntax check
+```
+
+Particularly useful contributions:
+- New DPI bypass strategies for ISPs we don't cover
+- Translators for additional config formats (sing-box, NekoBox, GoodbyeDPI)
+- Mobile / Linux / macOS ports
+- Documentation in your language
+
+See [`CLAUDE.md`](CLAUDE.md) for project conventions.
+
+---
+
+## 📜 License
+
+MIT — use freely, contribute back.
 
 <div align="center">
 
-**Made by PLGames**
+---
+
+**Made with ❤️ by [PLGames](https://github.com/Leonid1095)**
+
+*Свобода — не свобода что-то конкретное обходить. Свобода — это возможность не задумываться об этом.*
 
 </div>

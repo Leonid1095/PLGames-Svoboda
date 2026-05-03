@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="description" content="PLGames Svoboda — autonomous DPI bypass agent. Self-adapting, AI-powered, no VPN tunnel. Pure local packet manipulation.">
+<meta name="keywords" content="DPI bypass, zapret, Russia, TSPU, Discord, YouTube, Telegram, no VPN">
+<meta property="og:title" content="PLGames Svoboda — Autonomous DPI Bypass">
+<meta property="og:description" content="Your internet, your rules. AI-powered, self-adapting, community-driven. No VPN.">
+<meta property="og:type" content="website">
+<title>PLGames Svoboda — Autonomous DPI Bypass</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="hero">
+  <nav class="nav">
+    <div class="logo">🌐 <strong>Svoboda</strong></div>
+    <div class="nav-links">
+      <a href="#features">Features</a>
+      <a href="#chain">How it works</a>
+      <a href="#roadmap">Roadmap</a>
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda" target="_blank" rel="noopener">GitHub</a>
+    </div>
+  </nav>
+
+  <div class="hero-content">
+    <div class="badge">⚡ NEW · AI Strategy Engineer + Live Harvester</div>
+    <h1>Your internet,<br><span class="gradient">your rules.</span></h1>
+    <p class="hero-sub">
+      Autonomous DPI bypass agent. AI-powered, self-adapting, community-driven.<br>
+      <strong>This is not a VPN.</strong> No tunnel, no proxy server, no shared IP.
+    </p>
+    <div class="hero-cta">
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda" class="btn btn-primary" target="_blank" rel="noopener">
+        ⬇ Download from GitHub
+      </a>
+      <a href="#chain" class="btn btn-ghost">See how it works</a>
+    </div>
+    <div class="hero-stats">
+      <div><strong>184</strong><span>tests passing</span></div>
+      <div><strong>75+</strong><span>built-in strategies</span></div>
+      <div><strong>9+</strong><span>auto-harvested daily</span></div>
+      <div><strong>7</strong><span>fallback layers</span></div>
+    </div>
+  </div>
+</header>
+
+<main>
+
+<section id="problem" class="section section-dark">
+  <div class="container">
+    <div class="two-col">
+      <div>
+        <h2>The problem</h2>
+        <p class="lead">
+          In Russia, TSPU blocks Discord, YouTube, Twitter, Instagram, Facebook,
+          Telegram, Roblox, Riot Games, Crunchyroll — the list grows weekly.
+        </p>
+        <p>
+          Existing tools (GoodbyeDPI, Zapret, ByeDPI) need you to be a network engineer:
+          pick a config, edit flags, restart on every ISP change. When TSPU changes
+          rules — your config is suddenly useless and you need to find new flags
+          on Telegram channels at 2 AM.
+        </p>
+      </div>
+      <div>
+        <h2>The solution</h2>
+        <p class="lead">
+          Svoboda is autonomous. You launch it. It does the rest.
+        </p>
+        <ul class="check-list">
+          <li>Detects your ISP and DPI type</li>
+          <li>Tries community strategies first (instant if anyone solved it)</li>
+          <li>Falls through 7 layers of fallback automatically</li>
+          <li>Asks an LLM to invent new flags if nothing else works</li>
+          <li>Monitors 24/7 and re-adapts when TSPU changes rules</li>
+          <li>Shares wins with the community anonymously</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="features" class="section">
+  <div class="container">
+    <h2 class="section-title">What it unblocks</h2>
+    <p class="section-sub">Curated hostlist — only services genuinely blocked in RU.</p>
+
+    <div class="grid-3">
+      <div class="card">
+        <div class="card-icon">💬</div>
+        <h3>Social & Messaging</h3>
+        <ul>
+          <li>Discord</li>
+          <li>Telegram</li>
+          <li>Twitter / X</li>
+          <li>Instagram</li>
+          <li>Facebook · Messenger · WhatsApp</li>
+          <li>LinkedIn</li>
+          <li>Reddit</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-icon">🎮</div>
+        <h3>Games</h3>
+        <ul>
+          <li>Riot Games · LoL · Valorant</li>
+          <li>Roblox</li>
+          <li>PlayStation Network</li>
+          <li>Xbox · Microsoft Store</li>
+          <li>Epic Games · EA · Origin</li>
+          <li>Steam Community · Battle.net</li>
+          <li>Ubisoft Connect</li>
+        </ul>
+      </div>
+      <div class="card">
+        <div class="card-icon">🎬</div>
+        <h3>Streaming</h3>
+        <ul>
+          <li>YouTube (throttle bypass)</li>
+          <li>Netflix · Disney+ · HBO Max</li>
+          <li>Crunchyroll · Funimation</li>
+          <li>Spotify · Twitch</li>
+          <li>Hulu · Paramount+</li>
+          <li>Peacock · Hidive</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="chain" class="section section-dark">
+  <div class="container">
+    <h2 class="section-title">The Smart Bypass Chain</h2>
+    <p class="section-sub">When something is blocked, Svoboda escalates through 7 layers — automatically.</p>
+
+    <div class="chain">
+      <div class="layer">
+        <div class="layer-num">1</div>
+        <div class="layer-body">
+          <h4>Community Database</h4>
+          <p>Another user on your ISP already found a strategy → applied in 5 seconds.</p>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">2</div>
+        <div class="layer-body">
+          <h4>Local Cache</h4>
+          <p>Strategy that worked on this machine before — verified and re-applied.</p>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">3</div>
+        <div class="layer-body">
+          <h4>AI Advisor</h4>
+          <p>Top-4 from learned memory, ranked by past fitness on similar ISPs.</p>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">4</div>
+        <div class="layer-body">
+          <h4>Enumerator</h4>
+          <p>75+ hardcoded + live-harvested configs from <code>Flowseal/zapret-discord-youtube</code>.</p>
+        </div>
+      </div>
+      <div class="layer layer-new">
+        <div class="layer-num">5</div>
+        <div class="layer-body">
+          <h4>AI Strategy Engineer <span class="tag-new">NEW</span></h4>
+          <p>LLM analyzes raw symptoms (curl exit codes, latency, ISP) and invents a NOVEL flag combination not in any list.</p>
+        </div>
+      </div>
+      <div class="layer layer-new">
+        <div class="layer-num">6</div>
+        <div class="layer-body">
+          <h4>ByeDPI Layer 2 <span class="tag-new">NEW</span></h4>
+          <p>SOCKS5 userspace desync — different attack model than packet-level zapret. Often pierces TSPU MITM.</p>
+        </div>
+      </div>
+      <div class="layer">
+        <div class="layer-num">7</div>
+        <div class="layer-body">
+          <h4>Genetic Evolution</h4>
+          <p>Geneva-style mutations of the best strategy found so far — last resort.</p>
+        </div>
+      </div>
+    </div>
+
+    <p class="footnote">
+      Once a strategy is found, it's monitored 24/7, shared anonymously with the
+      community DB, and re-tested if connectivity degrades.
+    </p>
+  </div>
+</section>
+
+<section class="section">
+  <div class="container">
+    <h2 class="section-title">vs. Other tools</h2>
+
+    <div class="table-wrap">
+      <table class="comparison">
+        <thead>
+          <tr>
+            <th></th>
+            <th class="us">Svoboda</th>
+            <th>GoodbyeDPI</th>
+            <th>Zapret GUI</th>
+            <th>ByeDPI</th>
+            <th>Z-Discord-YT</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td>Auto-detects ISP & DPI</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td>Self-finds strategy</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td>Community sync</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td>Live config harvesting</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>manual</td></tr>
+          <tr><td>AI generates new strategies</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td>Self-adapts to changes</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td>Cross-host learning</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td>Body verification</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <blockquote>
+      Other tools give you a config. <strong>Svoboda <em>is</em> the config — it writes itself.</strong>
+    </blockquote>
+  </div>
+</section>
+
+<section id="roadmap" class="section section-dark">
+  <div class="container">
+    <h2 class="section-title">Roadmap</h2>
+
+    <div class="roadmap">
+
+      <div class="roadmap-col">
+        <h3 class="status-shipped">✓ Shipped</h3>
+        <ul>
+          <li>7-layer escalation chain</li>
+          <li>Live Strategy Harvester (Flowseal sync)</li>
+          <li>AI Strategy Engineer (LLM novel flags)</li>
+          <li>Pattern Transfer (cross-host learning)</li>
+          <li>ProbeEye continuous probing</li>
+          <li>Block-type aware dispatcher</li>
+          <li>ByeDPI Layer 2 fallback</li>
+          <li>Hostlist v2 — games & streaming</li>
+        </ul>
+      </div>
+
+      <div class="roadmap-col">
+        <h3 class="status-progress">⊙ In progress</h3>
+        <ul>
+          <li>Discord TSPU MITM bypass</li>
+          <li>Telegram on partial-IP-block ISPs</li>
+          <li>Server: per-ISP strategy blocklist</li>
+          <li>Server: AI proxy fallback chain</li>
+          <li>Server: curated hostlist endpoint</li>
+          <li>Server: TLS_MITM_INJECTION block type</li>
+          <li>Anti-spam on telemetry reports</li>
+        </ul>
+      </div>
+
+      <div class="roadmap-col">
+        <h3 class="status-planned">○ Planned</h3>
+        <ul>
+          <li>Anomaly Detector (DPI-shift detection)</li>
+          <li>Adaptive Rotation among top-N strategies</li>
+          <li>Federated meta-learning (cross-ISP)</li>
+          <li>Live LLM strategy injection (no restart)</li>
+          <li>Tray UI with traffic graph</li>
+          <li>Android client (VpnService)</li>
+          <li>Linux daemon (nfqws2)</li>
+          <li>macOS support</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<section id="install" class="section">
+  <div class="container">
+    <h2 class="section-title">Get started</h2>
+    <p class="section-sub">Windows 10+, Python 3.11+, Administrator rights.</p>
+
+    <div class="install-card">
+<pre><code>git clone https://github.com/Leonid1095/PLGames-Svoboda.git
+cd PLGames-Svoboda
+pip install -r requirements.txt
+run.bat</code></pre>
+    </div>
+
+    <div class="install-note">
+      <strong>Internet stuck?</strong>
+      <code>fix_internet.bat</code> — kills winws2, removes QUIC block, clears proxy, flushes DNS.
+    </div>
+
+    <div class="hero-cta" style="margin-top: 2rem;">
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda" class="btn btn-primary" target="_blank" rel="noopener">
+        Open repository
+      </a>
+      <a href="https://new.donatepay.ru/@lenya" class="btn btn-support" target="_blank" rel="noopener">
+        💛 Support the project
+      </a>
+    </div>
+  </div>
+</section>
+
+<section class="section section-dark">
+  <div class="container">
+    <h2 class="section-title">Privacy</h2>
+    <ul class="check-list center-list">
+      <li>Zero personal data collected — no IP, MAC, hostname, browsing history</li>
+      <li>Anonymous telemetry — only ISP type + strategy fitness score</li>
+      <li>Server is intelligence-only — never routes your traffic</li>
+      <li>All API keys server-side — never embedded in client binary</li>
+      <li>Full opt-out: <code>"share": false</code> in config.json</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="container footer-content">
+    <div>
+      <strong>PLGames Svoboda</strong><br>
+      <span class="footer-tagline">Свобода — это возможность не задумываться об этом.</span>
+    </div>
+    <div class="footer-links">
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda/blob/main/ROADMAP.md" target="_blank" rel="noopener">Roadmap</a>
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda/issues" target="_blank" rel="noopener">Issues</a>
+      <a href="https://new.donatepay.ru/@lenya" target="_blank" rel="noopener">Donate</a>
+    </div>
+    <div class="footer-meta">
+      MIT License · Made by <a href="https://github.com/Leonid1095" target="_blank" rel="noopener">PLGames</a>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

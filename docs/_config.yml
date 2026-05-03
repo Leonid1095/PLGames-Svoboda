@@ -1,0 +1,17 @@
+# GitHub Pages configuration for PLGames Svoboda landing page
+# https://docs.github.com/en/pages/setting-up-a-github-pages-site-with-jekyll
+
+title: PLGames Svoboda
+description: Autonomous DPI Bypass Agent — your internet, your rules. AI-powered, self-adapting, no VPN tunnel.
+url: https://leonid1095.github.io
+baseurl: /PLGames-Svoboda
+
+# Disable Jekyll processing — we serve plain HTML/CSS
+plugins: []
+exclude:
+  - README.md
+  - Gemfile
+  - Gemfile.lock
+
+# Theme: none (we ship our own CSS)
+theme: null
