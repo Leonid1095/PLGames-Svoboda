@@ -129,9 +129,10 @@ class ProxyRouter:
         Priority:
         0. PLGames VPS proxy (PRO tier — included in subscription)
         1. User's VPS proxy (fastest, user controls)
-        2. NaiveProxy (HTTPS-masquerading, most DPI-resistant)
+        2. NaiveProxy (HTTPS-masquerading, most DPI-resistant; opt-in via naive_proxy_url)
         3. Cloudflare WARP (free, autonomous — often blocked on TSPU)
-        4. Telemost WebRTC (manual, needs live call — break-glass only)
+        4. Telemost WebRTC (OPT-IN ONLY via telemost_auto=true — needs LIVE
+           Yandex Telemost call from user. NOT a 24/7 background tunnel.)
         """
         if not plan.proxy_hosts:
             return True  # nothing to proxy
@@ -243,7 +244,16 @@ class ProxyRouter:
                 "telemost_key": self.config.get("telemost_key", ""),
                 "telemost_socks_port": self.config.get("telemost_socks_port", 1083),
             }
-            if telemost_cfg["telemost_room_id"] and telemost_cfg["telemost_key"]:
+            # Telemost requires a LIVE Yandex Telemost call running on the
+            # user's side — they must keep the call open for the tunnel to
+            # exist. This makes Telemost UNUSABLE as a 24/7 background
+            # fallback. Opt-in only: requires explicit `telemost_auto: true`
+            # in config AND credentials. Default is to skip the entire block
+            # so we don't waste 20 seconds connecting to a stale call.
+            telemost_optin = bool(self.config.get("telemost_auto", False))
+            if (telemost_optin
+                and telemost_cfg["telemost_room_id"]
+                and telemost_cfg["telemost_key"]):
                 ok, dep_msg = TelemostTunnel.check_dependencies()
                 if ok:
                     self._telemost = TelemostTunnel(telemost_cfg)
