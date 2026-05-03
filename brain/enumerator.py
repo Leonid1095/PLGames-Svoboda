@@ -139,57 +139,59 @@ KNOWN_STRATEGIES: list[dict] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
-    # TIER 0.7: TLS MORPH FAMILY (for TLS_INTERFERENCE hosts)
-    # When TSPU corrupts the TLS handshake itself (curl exit=60), packet
-    # desync alone isn't enough — TSPU's parser can still see the
-    # ClientHello after reassembly. We attack the parser directly:
-    # fatten ClientHello with RFC 7685 padding to 2-4 KB, optionally
-    # reorder extensions and inject GREASE entries, then split across
-    # many TCP segments. TSPU's stateful parser has finite reassembly
-    # buffer; oversized fragmented ClientHellos either overflow it or
-    # cause the parser to give up and pass the connection through.
-    # Pure-local: no tunnel, no proxy, no server cooperation.
+    # TIER 0.7: TLS MORPH FAMILY — TEMPORARILY DISABLED (2026-05-03)
+    # Live-run on er-telecom AS42116 showed all 4 tls_morph variants
+    # return fitness=0.000 (0/2 fail-fast) with both 2KB padded and
+    # extension-reorder-only modes. tls_extreorder fails in 133ms (server
+    # rejects immediately with TLS error) — not a TSPU rate-limit, not a
+    # TSPU drop, but our lua _morph_client_hello helper producing invalid
+    # TLS payload after tls_dissect → modify ext_list → tls_reconstruct
+    # roundtrip. alpn_strip works (modifies dis.list inside an existing
+    # extension), so the bug is specifically in inserting/reordering at
+    # the OUTER ext_list level.
+    # The strategies stay in code (commented) so we don't lose context;
+    # they will be re-enabled once the lua bug is fixed.
     # ══════════════════════════════════════════════════════════════════
-    {
-        "name": "tls_morph_pad2k_split",
-        "flags": [
-            "tls_pad:size=2048",
-            "multisplit:pos=1:seqovl=568",
-            "multidisorder:pos=1,midsld",
-        ],
-        "desc": "TLS morph: 2KB padding + split@568 + disorder (Discord TLS_INTERFERENCE)",
-        "tags": ["tls_morph", "per_host"],
-    },
-    {
-        "name": "tls_morph_pad4k_aggressive",
-        "flags": [
-            "tls_pad:size=4096:reorder=1:grease=4",
-            "multisplit:pos=1:seqovl=4096",
-            "multidisorder:pos=1,midsld",
-        ],
-        "desc": "TLS morph aggressive: 4KB pad + SNI-reorder + 4 GREASE + 4KB seqovl (heavy)",
-        "tags": ["tls_morph", "per_host"],
-    },
-    {
-        "name": "tls_morph_pad2k_alpn_split",
-        "flags": [
-            "tls_pad:size=2048:grease=2",
-            "alpn_strip:strip=h2,h2c",
-            "multisplit:pos=1:seqovl=568",
-            "multidisorder:pos=1,midsld",
-        ],
-        "desc": "TLS morph + H2 downgrade combo (TSPU sees neither SNI nor h2 cleanly)",
-        "tags": ["tls_morph", "h2_downgrade", "per_host"],
-    },
-    {
-        "name": "tls_morph_extreorder_only",
-        "flags": [
-            "tls_extreorder:pos=end",
-            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
-        ],
-        "desc": "TLS morph minimal: only extension reorder + TLS-record overlap (low overhead)",
-        "tags": ["tls_morph", "per_host"],
-    },
+    # {
+    #     "name": "tls_morph_pad2k_split",
+    #     "flags": [
+    #         "tls_pad:size=2048",
+    #         "multisplit:pos=1:seqovl=568",
+    #         "multidisorder:pos=1,midsld",
+    #     ],
+    #     "desc": "TLS morph: 2KB padding + split@568 + disorder (Discord TLS_INTERFERENCE)",
+    #     "tags": ["tls_morph", "per_host"],
+    # },
+    # {
+    #     "name": "tls_morph_pad4k_aggressive",
+    #     "flags": [
+    #         "tls_pad:size=4096:reorder=1:grease=4",
+    #         "multisplit:pos=1:seqovl=4096",
+    #         "multidisorder:pos=1,midsld",
+    #     ],
+    #     "desc": "TLS morph aggressive: 4KB pad + SNI-reorder + 4 GREASE + 4KB seqovl (heavy)",
+    #     "tags": ["tls_morph", "per_host"],
+    # },
+    # {
+    #     "name": "tls_morph_pad2k_alpn_split",
+    #     "flags": [
+    #         "tls_pad:size=2048:grease=2",
+    #         "alpn_strip:strip=h2,h2c",
+    #         "multisplit:pos=1:seqovl=568",
+    #         "multidisorder:pos=1,midsld",
+    #     ],
+    #     "desc": "TLS morph + H2 downgrade combo (TSPU sees neither SNI nor h2 cleanly)",
+    #     "tags": ["tls_morph", "h2_downgrade", "per_host"],
+    # },
+    # {
+    #     "name": "tls_morph_extreorder_only",
+    #     "flags": [
+    #         "tls_extreorder:pos=end",
+    #         "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+    #     ],
+    #     "desc": "TLS morph minimal: only extension reorder + TLS-record overlap (low overhead)",
+    #     "tags": ["tls_morph", "per_host"],
+    # },
 
     # ══════════════════════════════════════════════════════════════════
     # TIER 1: COMMUNITY PROVEN (Flowseal ALT11, Dronatar v4.6)
