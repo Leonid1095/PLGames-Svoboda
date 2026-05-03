@@ -368,6 +368,111 @@ synchronized drop = TSPU обновился — preemptive cascade ДО юзер
 
 ---
 
+## Live-run findings & fixes (2026-05-03)
+
+Real-world test session on er-telecom AS42116 with TSPU TLS_INTERFERENCE
++ HTTP2_STREAM_KILL active. Many prior fixes in main were not actually
+exercised because the per-host solver / hoisting / warm-pool pipeline
+was silently dead. This session: forced activation, observed reality.
+
+### What we confirmed actually works in production
+- **winws2 health monitor (Layer 0)**: caught `winws2 crashed rc=1`,
+  respawned in 4 seconds (vs 5-min blackout previously). Validated.
+- **Block-type-aware dispatcher**: when host_solver is invoked with
+  block_type, hoisting fires (observed for both HTTP2_STREAM_KILL and
+  TLS_INTERFERENCE) and the targeted family is tested first.
+- **Throughput-aware health check**: replaced fake fitness 0.770 with
+  honest 0.395 once TLS_INTERFERENCE Discord was kept in test_hosts.
+- **Throttle scoring fix**: `test_strategy_single_host` now returns 0.2
+  (not 1.0) for throttled responses, so the warm pool doesn't fill with
+  "works in 8 seconds" non-fixes.
+- **ProbeEye (SMART layer 1)**: started successfully, wrote 16 probe
+  rows to analytics.probe_history before the process died from another
+  cause (see "Process freeze" below).
+- **alpn_strip lua primitive**: actually executed in winws2 without
+  errors. zapret2 accepted our lua function. Strategies using it
+  scored 0.385-0.445 (below 0.55 threshold but functional).
+- **Pattern Transfer schema**: created in DB on first PatternTransfer()
+  init; methods exist and are exercised by tests.
+
+### What we found broken
+- **tls_morph family DISABLED** (`15fef41`). All 4 strategies returned
+  fitness=0.000 in shadow tests:
+    - `tls_pad:size=2048` → 10s timeout, server unresponsive
+    - `tls_pad:size=4096` → 10s timeout
+    - `tls_pad + alpn_strip` combo → 10s timeout
+    - `tls_extreorder:pos=end` → 133ms TLS reject (server immediate error)
+  The 133ms reject for the simplest mod (just SNI position change) is
+  the smoking gun. Bug is in `_morph_client_hello` helper round-trip
+  `tls_dissect → modify ext_list → tls_reconstruct` — produces invalid
+  TLS bytes when ext_list cardinality or order changes. alpn_strip works
+  because it modifies dis.list INSIDE an existing extension (not the
+  outer ext_list). **Needs isolated test stand to debug** — analysis
+  of zapret-lib.lua tls_dissect/tls_reconstruct didn't pinpoint the
+  divergence; suspect a non-byte-perfect roundtrip for some extensions.
+  Even if fixed, padding-style attacks may not crack TSPU's current
+  TLS_INTERFERENCE on Discord (TSPU detects oversized ClientHellos).
+- **TLS_INTERFERENCE / proxy-routed hosts dropped from test_hosts**
+  (`553830f` fixed). Legacy code excluded these hosts from monitoring
+  on the assumption "no local fix possible — wait for tunnel". Now
+  that we have local primitives (alpn_strip, tls_morph[broken],
+  multisplit), we keep them in test_hosts so the watchdog can trigger
+  per-host solver. Only IP_BLOCK is excluded going forward.
+- **Process freeze after ~3 minutes** (root cause not nailed). After
+  ProbeEye started + winws2 ran a few cycles, python process went
+  silent: log file froze, probe_history stopped accumulating, winws2
+  disappeared from tasklist. Likely Telemost asyncio loop or AI Engine
+  retry loop caught the main thread. Telemost is now opt-in (`92a8e7a`)
+  so should be eliminated as cause; AI Engine fallback path needs
+  deeper review.
+- **TSPU rate-limit after ~50 rapid shadow-zapret curls**. Every test
+  returned fitness=0.000 for an extended period. Caused full enum to
+  waste 30+ minutes producing zero-fitness results. Mitigated by:
+
+### Mitigations added today
+- **Enum zero-streak abort** (`d6081cf`): enumerator aborts after 5
+  consecutive 0-fitness results, sets `last_result_kind="aborted_rate_limit"`.
+- **Watchdog backoff on rate-limit** (`aa6a83c`): when enum aborts due
+  to rate-limit, watchdog skips Step 5 GA evolution (which would deepen
+  the rate-limit) and bumps interval to 30 min for cool-down.
+- **NaiveProxy auto-tunnel removed** by user mandate ("это снова впн —
+  нужно локальное"). NaiveProxy code retained in repo but not in
+  default cascade.
+- **Telemost auto-attempt removed** (`92a8e7a`): explicit opt-in via
+  `telemost_auto: true` config flag required.
+
+### What's still pending for next session
+- **Fix tls_morph lua bug** — needs isolated test (zapret2 in shadow
+  with single curl, capture rtls bytes, compare against original).
+  Or: rewrite tls_pad as raw byte manipulation (insert padding
+  extension bytes directly without going through tls_dissect roundtrip).
+- **Investigate process freeze root cause** — narrow down between
+  Telemost asyncio leak, AI Engine retry storm, WinDivert wedge,
+  ProbeEye contention. Add per-thread health logging.
+- **Per-host "give up" policy** — after 3 failed solves with all
+  strategies < 0.5 fitness, mark host as "needs-tunnel-or-wait" and
+  stop testing it for N hours. Prevents global-fitness drag from
+  unsolvable Discord-style hosts.
+- **AI backend repair** — server-side: AI proxy returns HTTP 502, AI
+  backend HTTP 403. Token expired or upstream unreachable. Independent
+  of client work.
+- **Pattern Transfer activation in production** — wasn't triggered
+  this session because no per-host solve produced fitness >= 0.5 to
+  record as a pattern. Will activate naturally once any TLS_INTERFERENCE
+  / HTTP2_STREAM_KILL host gets a proper solve.
+
+### Stats
+- Commits today: 18+
+- Tests: 110 → 152 (+42 new for warm pool, pattern transfer, probe_eye,
+  enumerator zero-streak, geneva preservation)
+- Live activations confirmed: alpn_strip ✓, host_solver ✓,
+  block-type dispatcher ✓, ProbeEye ✓, winws2 health monitor ✓,
+  throughput scoring ✓
+- Live activations failed: tls_pad ✗, tls_extreorder ✗,
+  pattern_transfer (no input data this session)
+
+---
+
 ## Последние исправления (2026-03-26)
 
 ### Сервер (api.py)
