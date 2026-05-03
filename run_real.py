@@ -1077,18 +1077,24 @@ def main():
                 classifier_strategies.append(s)
 
     # ─── Initialize tester ──────────────────────────────────────────
-    # Remove IP-blocked and proxy-routed domains from test_hosts.
-    # These can NEVER be unblocked by DPI bypass — testing them wastes
-    # time and drags fitness below threshold.
+    # Remove ONLY truly-untestable hosts from test_hosts:
+    #   - IP_BLOCK: nothing local can fix this (need a tunnel/proxy)
+    # We keep TLS_INTERFERENCE / HTTP2_STREAM_KILL / SNI_FILTERING etc.
+    # in the test_hosts list because we now have local primitives that
+    # can solve them (alpn_strip, tls_pad, multisplit). Removing them
+    # means watchdog never sees them fail again, host_solver never
+    # activates, and our targeted families (h2_downgrade, tls_morph)
+    # never get a chance to try.
+    # proxy_router puts TLS_INTERFERENCE in proxy_hosts by legacy
+    # convention; we ignore that here and keep them testable.
     _ip_blocked_hosts = {h for h, r in blocked.items() if r.block_type == "IP_BLOCK"}
-    _proxy_hosts = set(routing_plan.proxy_hosts) if routing_plan else set()
-    _untestable = _ip_blocked_hosts | _proxy_hosts
+    _untestable = _ip_blocked_hosts  # no longer adding _proxy_hosts
     if _untestable:
         _old_hosts = config.get("test_hosts", [])
         _new_hosts = [h for h in _old_hosts if h not in _untestable]
         if _new_hosts:
             config["test_hosts"] = _new_hosts
-            logger.info("Test hosts updated: removed %s (IP-blocked/proxied), keeping %s",
+            logger.info("Test hosts updated: removed %s (IP-blocked, no local fix), keeping %s",
                         _untestable, _new_hosts)
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
     # Refresh hosts after IP-blocked filtering (watchdog uses this)
