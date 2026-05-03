@@ -1229,18 +1229,23 @@ def main():
         # reads this baseline to spot TSPU updates BEFORE the user notices
         # "site stopped working". ProbeEye is read-only — never triggers
         # recovery itself; that's the watchdog's job.
+        # Opt-out: set "probe_eye_enabled": false in config to disable
+        # entirely (e.g. if it's suspected of breaking the watchdog).
         _probe_eye = None
-        try:
-            from brain.probe_eye import ProbeEye
-            _probe_eye = ProbeEye(
-                analytics=analytics,
-                hosts=hosts,
-                probe_fn=_curl_check_one,
-                strategy_id_fn=lambda: _wd_sid,
-            )
-            _probe_eye.start()
-        except Exception as _pe_exc:
-            logger.warning("ProbeEye failed to start: %s", _pe_exc)
+        if config.get("probe_eye_enabled", True):
+            try:
+                from brain.probe_eye import ProbeEye
+                _probe_eye = ProbeEye(
+                    analytics=analytics,
+                    hosts=hosts,
+                    probe_fn=_curl_check_one,
+                    strategy_id_fn=lambda: _wd_sid,
+                )
+                _probe_eye.start()
+            except Exception as _pe_exc:
+                logger.warning("ProbeEye failed to start: %s", _pe_exc)
+        else:
+            logger.info("ProbeEye disabled by config (probe_eye_enabled=false)")
 
         while _running:
             for _ in range(_wd_interval):

@@ -110,18 +110,32 @@ class ProbeEye:
     # ─── Internals ───────────────────────────────────────────────────────
 
     def _loop(self) -> None:
-        """Main background loop — one sweep per interval_sec."""
+        """Main background loop — one sweep per interval_sec.
+
+        Wrapped in a top-level try/except so a single uncaught exception
+        cannot kill the daemon thread silently. If something goes wrong
+        we log it loudly and continue — better a noisy ProbeEye than a
+        dead-but-invisible one.
+        """
         # Stagger the first sweep slightly so we don't collide with startup
         # health-check; the watchdog usually does its baseline first.
         self._sleep_responsive(2.0)
 
         while not self._stop_event.is_set():
             sweep_start = time.time()
-            self._sweep_once()
+            try:
+                self._sweep_once()
+            except Exception as exc:
+                # Top-level guard: never let a single bad sweep kill the loop.
+                # Log at WARNING (not DEBUG) so silent failures become visible.
+                logger.warning("ProbeEye sweep crashed: %s", exc, exc_info=True)
 
             # Periodic purge (cheap; bounded by index lookup)
             if time.time() - self._last_purge >= self._purge_every_sec:
-                self._purge()
+                try:
+                    self._purge()
+                except Exception as exc:
+                    logger.warning("ProbeEye purge crashed: %s", exc)
                 self._last_purge = time.time()
 
             elapsed = time.time() - sweep_start
