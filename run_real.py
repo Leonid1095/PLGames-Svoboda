@@ -1704,6 +1704,7 @@ def main():
                 excluded = set(forbid_genes or []) | ai_feedback.get_excluded_functions()
                 enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
                 best_fit, best_flags, best_name = 0.0, [], ""
+                tried_history: list[tuple[str, float]] = []
                 # Stop permanent so shadow tester can use WinDivert
                 _was_running = _active_process is not None
                 if _was_running:
@@ -1716,10 +1717,56 @@ def main():
                         fit = tester.test_strategy(s["flags"])
                         _hr = tester._last_report.host_results if tester._last_report else {}
                         ai_feedback.record_test(s["flags"], fit, "ok" if fit > 0.3 else "timeout", host_results=_hr)
+                        tried_history.append((s["name"], fit))
                         if fit > best_fit:
                             best_fit, best_flags, best_name = fit, s["flags"], s["name"]
                         if fit >= stop_on_fitness:
                             break
+
+                    # AI Strategy Engineer: enum exhausted with no winner → ask LLM
+                    # to invent a novel flag combination from raw symptoms.
+                    if best_fit < stop_on_fitness and _running and ai and ai.is_available():
+                        try:
+                            from brain.ai_strategy_engineer import AIStrategyEngineer
+                            engineer = AIStrategyEngineer(ai)
+                            failing = [h for h in (hosts or config.get("test_hosts", [])) if h not in (blocked or {}) or blocked[h].block_type != "IP_BLOCK"]
+                            block_type = ""
+                            for h, info in (blocked or {}).items():
+                                if info.block_type:
+                                    block_type = info.block_type
+                                    break
+                            error_pattern = "all enum strategies < threshold; recent failures returned fitness ~0"
+                            proposal = engineer.request_strategy(
+                                isp=isp_name, block_type=block_type,
+                                failing_hosts=failing[:5],
+                                tried_strategies=tried_history,
+                                error_pattern=error_pattern,
+                            )
+                            if proposal:
+                                logger.info("AI Engineer proposing: %s — %s", " | ".join(proposal.flags), proposal.reasoning)
+                                fit = tester.test_strategy(proposal.flags)
+                                ai_feedback.record_test(proposal.flags, fit, "ok" if fit > 0.3 else "timeout")
+                                tried_history.append((f"ai_engineer_{int(time.time())}", fit))
+                                if fit > best_fit:
+                                    best_fit, best_flags, best_name = fit, proposal.flags, "ai_engineer"
+                        except Exception as exc:
+                            logger.debug("AI Engineer step skipped: %s", exc)
+
+                    # Layer 2 fallback: zapret2 fundamentally can't pierce → spin
+                    # up ByeDPI SOCKS5. Different attack model (userspace TLS
+                    # mod via SOCKS) often works when packet-level desync fails
+                    # against TSPU MITM injection.
+                    if best_fit < 0.3 and _running and not config.get("byedpi_disabled"):
+                        try:
+                            from brain.byedpi import ByeDPIFallback
+                            _byedpi_fb = ByeDPIFallback(config, base_dir=str(BASE_DIR))
+                            if _byedpi_fb.is_available() or _byedpi_fb.download_binary():
+                                logger.info("Escalating to ByeDPI Layer 2 fallback")
+                                if _byedpi_fb.start(block_type="sni_filtering"):
+                                    logger.info("ByeDPI SOCKS5 ready on %s", _byedpi_fb.proxy_url)
+                                    # ByeDPI runs alongside; user apps can route via 127.0.0.1:1080
+                        except Exception as exc:
+                            logger.debug("ByeDPI escalation skipped: %s", exc)
                 finally:
                     # Restart permanent if it was running (unless apply_strategy will do it)
                     if _was_running and not _active_process:
