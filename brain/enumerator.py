@@ -139,6 +139,59 @@ KNOWN_STRATEGIES: list[dict] = [
     },
 
     # ══════════════════════════════════════════════════════════════════
+    # TIER 0.7: TLS MORPH FAMILY (for TLS_INTERFERENCE hosts)
+    # When TSPU corrupts the TLS handshake itself (curl exit=60), packet
+    # desync alone isn't enough — TSPU's parser can still see the
+    # ClientHello after reassembly. We attack the parser directly:
+    # fatten ClientHello with RFC 7685 padding to 2-4 KB, optionally
+    # reorder extensions and inject GREASE entries, then split across
+    # many TCP segments. TSPU's stateful parser has finite reassembly
+    # buffer; oversized fragmented ClientHellos either overflow it or
+    # cause the parser to give up and pass the connection through.
+    # Pure-local: no tunnel, no proxy, no server cooperation.
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "tls_morph_pad2k_split",
+        "flags": [
+            "tls_pad:size=2048",
+            "multisplit:pos=1:seqovl=568",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "TLS morph: 2KB padding + split@568 + disorder (Discord TLS_INTERFERENCE)",
+        "tags": ["tls_morph", "per_host"],
+    },
+    {
+        "name": "tls_morph_pad4k_aggressive",
+        "flags": [
+            "tls_pad:size=4096:reorder=1:grease=4",
+            "multisplit:pos=1:seqovl=4096",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "TLS morph aggressive: 4KB pad + SNI-reorder + 4 GREASE + 4KB seqovl (heavy)",
+        "tags": ["tls_morph", "per_host"],
+    },
+    {
+        "name": "tls_morph_pad2k_alpn_split",
+        "flags": [
+            "tls_pad:size=2048:grease=2",
+            "alpn_strip:strip=h2,h2c",
+            "multisplit:pos=1:seqovl=568",
+            "multidisorder:pos=1,midsld",
+        ],
+        "desc": "TLS morph + H2 downgrade combo (TSPU sees neither SNI nor h2 cleanly)",
+        "tags": ["tls_morph", "h2_downgrade", "per_host"],
+    },
+    {
+        "name": "tls_morph_extreorder_only",
+        "flags": [
+            "tls_extreorder:pos=end",
+            "multidisorder:pos=1,midsld:seqovl=5:seqovl_pattern=0x1603030000",
+        ],
+        "desc": "TLS morph minimal: only extension reorder + TLS-record overlap (low overhead)",
+        "tags": ["tls_morph", "per_host"],
+    },
+
+    # ══════════════════════════════════════════════════════════════════
     # TIER 1: COMMUNITY PROVEN (Flowseal ALT11, Dronatar v4.6)
     # These use fake packets — work on ISPs that don't detect fake.
     # ══════════════════════════════════════════════════════════════════

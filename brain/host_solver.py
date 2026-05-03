@@ -30,6 +30,10 @@ logger = logging.getLogger("svoboda.host_solver")
 # Empty/unknown block_type → no hoisting, default priority order applies.
 BLOCK_TYPE_TAGS: dict[str, str] = {
     "HTTP2_STREAM_KILL": "h2_downgrade",
+    # TLS_INTERFERENCE → tls_morph: pure-local TLS payload obfuscation
+    # (RFC 7685 padding + extension reorder + GREASE) overflows TSPU's
+    # stateful parser when desync alone fails. No tunnel needed.
+    "TLS_INTERFERENCE": "tls_morph",
     # Future: SNI_FILTER → "fake_hello_inject", THROTTLING → "anti_throttle"
 }
 

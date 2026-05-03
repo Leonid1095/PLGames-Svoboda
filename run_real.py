@@ -1209,7 +1209,7 @@ def main():
 
             # ── Health check ──────────────────────────────────────────
             now = datetime.now().strftime("%H:%M")
-            status_parts = []
+            host_statuses = []  # list[(host_short, success, latency_ms, error_type)]
             for host in hosts:
                 r = _curl_check_one(host, timeout=10)
                 analytics.log_test_result(
@@ -1218,15 +1218,28 @@ def main():
                     latency_ms=r["latency_ms"], error_type=r["error_type"],
                 )
                 short = host.replace(".com", "").replace(".discordapp", "")
-                if r["success"]:
-                    status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
-                else:
-                    status_parts.append(f"{short}:{(r['error_type'] or 'FAIL').upper()}")
+                # Tag throttled successes (>=5s) as SLOW so UI can warn
+                lat = r["latency_ms"]
+                err = r["error_type"] or ""
+                if r["success"] and lat >= 5000:
+                    err = "THROTTLED"
+                host_statuses.append((short, r["success"], lat, err))
 
             health = analytics.get_all_hosts_health(hosts, minutes=10)
             overall = health["overall_rate"]
             degraded = health.get("degraded", [])
-            print(f"  [{now}] {' | '.join(status_parts)}  (health={overall:.0%})")
+
+            # Colored live status line: green OK / yellow SLOW / red FAIL+reason
+            health_color = ui.C.GREEN if overall >= 0.8 else ui.C.YELLOW if overall >= 0.5 else ui.C.RED
+            parts = []
+            for short, ok_, latency_ms, err in host_statuses:
+                if ok_ and not err:
+                    parts.append(f"{ui.C.GREEN}{short}:OK({latency_ms:.0f}ms){ui.C.RESET}")
+                elif ok_ and err == "THROTTLED":
+                    parts.append(f"{ui.C.YELLOW}{short}:SLOW({latency_ms:.0f}ms){ui.C.RESET}")
+                else:
+                    parts.append(f"{ui.C.RED}{short}:{(err or 'FAIL').upper()}{ui.C.RESET}")
+            print(f"  {ui.C.GRAY}[{now}]{ui.C.RESET} {' | '.join(parts)}  {health_color}health={overall:.0%}{ui.C.RESET}")
 
             # ── Adaptive watchdog interval ────────────────────────────
             # Shorter checks after failures (catch DPI changes fast),
