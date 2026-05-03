@@ -1587,6 +1587,7 @@ def main():
                             break
 
                 # Step 4: Enumeration
+                _enum_aborted_rate_limit = False
                 if not found_fix:
                     ui.step("Step 4: Fast enumeration...")
                     excluded = ai_feedback.get_excluded_functions()
@@ -1606,9 +1607,22 @@ def main():
                             _tspu_recommended_ttl, config,
                         )
                         found_fix = bool(_active_process)
+                    elif en.last_result_kind == "aborted_rate_limit":
+                        # TSPU rate-limited us mid-enum. GA will only deepen
+                        # the rate-limit (more rapid curls) and per-host
+                        # solver hits the same wall. Force long backoff —
+                        # next watchdog tick in 30 min, not the usual 5.
+                        _enum_aborted_rate_limit = True
+                        _wd_interval = max(_wd_interval, 1800)
+                        ui.warn("TSPU rate-limit detected — backing off 30 min "
+                                "before next recovery attempt")
+                        logger.warning(
+                            "Recovery cascade aborted: enum hit rate-limit "
+                            "guard. Watchdog interval bumped to 30 min."
+                        )
 
-                # Step 5: GA
-                if not found_fix:
+                # Step 5: GA — skip when enum bailed on rate-limit
+                if not found_fix and not _enum_aborted_rate_limit:
                     ui.step("Step 5: GA evolution...")
                     seeds = _get_seeds(isp_name, ai, ai_feedback=ai_feedback, tspu_profile=tspu_profile)
                     gb = _run_evolution(

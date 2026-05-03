@@ -670,6 +670,11 @@ class StrategyEnumerator:
                  excluded_functions: Optional[set[str]] = None):
         self.strategies = strategies or KNOWN_STRATEGIES
         self.excluded_functions = excluded_functions or set()
+        # Outcome of the last enumerate() call. Lets the caller distinguish
+        # genuine "no strategy works" (proceed to GA) from "TSPU rate-limit
+        # — every test was 0, back off and don't waste more cycles".
+        # Values: "found" | "exhausted" | "aborted_rate_limit" | "not_run"
+        self.last_result_kind: str = "not_run"
 
     def enumerate(
         self,
@@ -699,6 +704,7 @@ class StrategyEnumerator:
         total = len(self.strategies)
         logger.info("Enumerating %d known strategies (threshold=%.2f)", total, threshold)
         zero_streak = 0
+        self.last_result_kind = "not_run"
 
         for i, strat in enumerate(self.strategies):
             name = strat["name"]
@@ -730,6 +736,7 @@ class StrategyEnumerator:
 
             if fitness >= threshold:
                 logger.info("Found working strategy: %s (fitness=%.3f)", name, fitness)
+                self.last_result_kind = "found"
                 return {"name": name, "flags": flags, "fitness": fitness, "desc": strat.get("desc", "")}
 
             # Rate-limit / wedge guard: if N strategies in a row return
@@ -745,11 +752,13 @@ class StrategyEnumerator:
                         "Backing off; recovery should retry later.",
                         zero_streak,
                     )
+                    self.last_result_kind = "aborted_rate_limit"
                     return None
             else:
                 zero_streak = 0
 
         logger.warning("No strategy passed threshold %.2f", threshold)
+        self.last_result_kind = "exhausted"
         return None
 
     def enumerate_thorough(

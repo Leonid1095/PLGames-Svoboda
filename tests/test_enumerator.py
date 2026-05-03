@@ -73,6 +73,30 @@ class TestZeroStreakAbort(unittest.TestCase):
         self.assertIsNotNone(result)
         self.assertEqual(result["name"], "s3")
 
+    def test_last_result_kind_signals_outcome(self):
+        """last_result_kind lets caller distinguish "exhausted" from
+        "aborted_rate_limit" so backoff logic can fire only on the latter."""
+        # Found case
+        mock_t = MagicMock()
+        mock_t.test_strategy.return_value = 0.9
+        enum = StrategyEnumerator(strategies=self._make_strategies(3))
+        enum.enumerate(mock_t, threshold=0.5, zero_streak_abort=5)
+        self.assertEqual(enum.last_result_kind, "found")
+
+        # Exhausted case (all under threshold but non-zero, so no abort)
+        mock_t = MagicMock()
+        mock_t.test_strategy.return_value = 0.3
+        enum = StrategyEnumerator(strategies=self._make_strategies(3))
+        enum.enumerate(mock_t, threshold=0.5, zero_streak_abort=5)
+        self.assertEqual(enum.last_result_kind, "exhausted")
+
+        # Aborted case (5 zeros in a row)
+        mock_t = MagicMock()
+        mock_t.test_strategy.return_value = 0.0
+        enum = StrategyEnumerator(strategies=self._make_strategies(20))
+        enum.enumerate(mock_t, threshold=0.5, zero_streak_abort=5)
+        self.assertEqual(enum.last_result_kind, "aborted_rate_limit")
+
     def test_does_not_count_skipped_excluded(self):
         """Excluded-function skips don't count toward streak (no test ran)."""
         # All non-excluded fail, but we have only 3 of them
