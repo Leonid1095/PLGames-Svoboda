@@ -784,6 +784,12 @@ def main():
 
     # ─── Init modules ─────────────────────────────────────────────────
     analytics = Analytics(config)
+    # SMART layer 2: cross-host pattern transfer engine. Stores winning
+    # (isp, block_type) → strategy mappings in analytics DB so that the
+    # second-and-subsequent hosts of any block type get an instant solve
+    # via cached pattern instead of 70-strategy enumeration.
+    from brain.pattern_transfer import PatternTransfer
+    pattern_transfer = PatternTransfer(analytics)
     manager = StrategyManager(config)
     tier = TierManager(config)
     donate = DonateManager(config)
@@ -1129,7 +1135,7 @@ def main():
         # Load saved per-host strategies on entry
         try:
             from brain.host_solver import HostSolver as _HSBoot
-            _hs_boot = _HSBoot(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+            _hs_boot = _HSBoot(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
             _wd_extra = _hs_boot.build_extra_profiles(lua_dir)
             if _wd_extra and _active_process:
                 ui.info(f"Loaded {len(_wd_extra) // 4} saved per-host strategies")
@@ -1146,7 +1152,7 @@ def main():
         try:
             from brain.discovery import DiscoveryPipeline
             from brain.host_solver import HostSolver as _HSDisc
-            _ds = _HSDisc(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+            _ds = _HSDisc(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
             _discovery = DiscoveryPipeline(
                 config, tester=tester, classifier=BlockageClassifier(timeout=5),
                 host_solver=_ds, proxy_router=router,
@@ -1417,7 +1423,7 @@ def main():
                 # leaving _active_process as a stale reference.
                 _stop_permanent_zapret(_active_process)
                 _active_process = None
-                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
                 solved = False
                 try:
                     # Process ALL failed hosts (not just 2) — each may need
@@ -1623,7 +1629,7 @@ def main():
                         # (shadow tester needs exclusive WinDivert access)
                         _stop_permanent_zapret(_active_process)
                         _active_process = None
-                        sv = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                        sv = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
                         try:
                             for fh in bad[:2]:
                                 # Reuse Step 1 classification when available
@@ -1718,7 +1724,7 @@ def main():
                     _stop_permanent_zapret(_active_process)
                     _active_process = None
                 try:
-                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
                     # Pass block_type so solver can hoist matching strategies
                     # (e.g. HTTP2_STREAM_KILL → h2_downgrade family first)
                     bt = blocked[host].block_type if blocked.get(host) else ""
@@ -1912,7 +1918,7 @@ def main():
                             extra = []
                             try:
                                 from brain.host_solver import HostSolver
-                                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                                solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
                                 any_solved = False
                                 for fh in failed_hosts:
                                     if not _running:
@@ -2122,7 +2128,7 @@ def main():
                     # Stop permanent zapret — shadow tester needs exclusive WinDivert
                     _stop_permanent_zapret(_active_process)
                     _active_process = None
-                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync)
+                    solver = HostSolver(config, tester=tester, ai_feedback=ai_feedback, server_sync=sync, pattern_transfer=pattern_transfer)
                     try:
                         for fh in failed_hosts:
                             if not _running:

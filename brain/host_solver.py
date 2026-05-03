@@ -87,13 +87,19 @@ class HostSolver:
             solver.save()
     """
 
-    def __init__(self, config: dict, tester=None, ai_feedback=None, server_sync=None):
+    def __init__(self, config: dict, tester=None, ai_feedback=None,
+                 server_sync=None, pattern_transfer=None):
         self._config = config
         self._base_dir = Path(config.get("_base_dir", "."))
         self._db_path = self._base_dir / "host_strategies.json"
         self._tester = tester
         self._ai_feedback = ai_feedback
         self._sync = server_sync
+        # SMART layer 2: cross-host strategy generalization. Optional —
+        # when present, solver records winning patterns and tries known-good
+        # patterns BEFORE the 70-strategy enumeration. Caller wires
+        # PatternTransfer(analytics) and passes it in.
+        self._pattern_transfer = pattern_transfer
         self._strategies: dict[str, HostStrategy] = {}
         self._byedpi = None  # Track running ByeDPI instance for cleanup
         self._load()
@@ -198,6 +204,60 @@ class HostSolver:
             except Exception as exc:
                 logger.debug("Level 0 community check failed: %s", exc)
 
+        # ── Level 0.5: Pattern transfer (SMART layer 2) ───────────────
+        # If we've seen (isp, block_type) before, try the top known pattern
+        # FIRST instead of walking 70 strategies. Saves minutes per host on
+        # the second-and-subsequent host of any block type — e.g. once we
+        # solve discord.com TLS_INTERFERENCE, cdn.discordapp.com gets the
+        # same strategy in 1 test instead of 1-3 dozen.
+        if (self._pattern_transfer and not strategies_to_try
+                and isp and block_type):
+            try:
+                patterns = self._pattern_transfer.get_top_patterns(
+                    isp=isp, block_type=block_type, limit=2,
+                )
+                for pat in patterns:
+                    pat_flags = pat.get("flags", [])
+                    if not pat_flags:
+                        continue
+                    fitness = self._tester.test_strategy_single_host(pat_flags, host)
+                    if fitness > 0.5:
+                        logger.info(
+                            "Solved %s: Level 0.5 (pattern transfer from %s) — "
+                            "fitness=%.3f, pattern wins=%d",
+                            host, ",".join(pat.get("sample_hosts", [])[:2]),
+                            fitness, pat.get("wins", 0),
+                        )
+                        hs = HostStrategy(
+                            host=host, flags=pat_flags, fitness=fitness,
+                            isp=isp, tested_at=time.time(),
+                        )
+                        self._strategies[host] = hs
+                        self._save()
+                        # Record the new win to bump pattern stats and
+                        # extend sample_hosts list
+                        self._pattern_transfer.record_pattern_win(
+                            isp=isp, block_type=block_type,
+                            flags=pat_flags, fitness=fitness, host=host,
+                        )
+                        if self._sync and fitness > 0.5:
+                            try:
+                                self._sync.report_host_strategy(
+                                    host, pat_flags, fitness, isp,
+                                )
+                            except Exception:
+                                pass
+                        return hs
+                # Patterns existed but none worked → fall through to enum
+                if patterns:
+                    logger.debug(
+                        "Pattern transfer: %d known patterns for (%s, %s) all "
+                        "failed for %s — falling through to enum",
+                        len(patterns), isp, block_type, host,
+                    )
+            except Exception as exc:
+                logger.debug("Pattern transfer lookup failed: %s", exc)
+
         # ── Level 1: Standard zapret2 strategies ──────────────────────
         candidates = strategies_to_try or KNOWN_STRATEGIES
 
@@ -291,6 +351,17 @@ class HostSolver:
             if self._sync and best_fitness > 0.5:
                 try:
                     self._sync.report_host_strategy(host, best_flags, best_fitness, isp)
+                except Exception:
+                    pass
+            # Pattern transfer (SMART layer 2): record this win so the
+            # NEXT host of the same (isp, block_type) goes through Level 0.5
+            # fast path instead of re-enumerating 70 strategies.
+            if self._pattern_transfer and isp and block_type and best_fitness > 0.5:
+                try:
+                    self._pattern_transfer.record_pattern_win(
+                        isp=isp, block_type=block_type,
+                        flags=best_flags, fitness=best_fitness, host=host,
+                    )
                 except Exception:
                     pass
             return hs
