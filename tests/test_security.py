@@ -261,11 +261,12 @@ class TestListExclude(unittest.TestCase):
             self.assertIn(d, domains, f"Critical domain {d} must be in list-exclude.txt")
 
     def test_exclude_no_empty_lines_or_invalid(self):
-        """list-exclude.txt should have valid domain format."""
+        """list-exclude.txt should have valid domain format. Comments
+        (lines starting with #) are allowed for readability."""
         content = (BASE_DIR / "list-exclude.txt").read_text(encoding="utf-8")
         for i, line in enumerate(content.split("\n"), 1):
             line = line.strip()
-            if not line:
+            if not line or line.startswith("#"):
                 continue
             self.assertTrue(
                 re.match(r'^[a-zA-Z0-9][a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$', line),

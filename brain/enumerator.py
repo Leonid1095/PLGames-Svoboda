@@ -716,8 +716,27 @@ class StrategyEnumerator:
     """
 
     def __init__(self, strategies: Optional[list[dict]] = None,
-                 excluded_functions: Optional[set[str]] = None):
-        self.strategies = strategies or KNOWN_STRATEGIES
+                 excluded_functions: Optional[set[str]] = None,
+                 include_harvested: bool = False):
+        base = list(strategies) if strategies is not None else list(KNOWN_STRATEGIES)
+        if include_harvested and strategies is None:
+            try:
+                from brain.strategy_harvester import harvest_safe
+                harvested = harvest_safe()
+                seen = {"|".join(s["flags"]) for s in base}
+                added = 0
+                for h in harvested:
+                    sig = "|".join(h["flags"])
+                    if sig in seen:
+                        continue
+                    seen.add(sig)
+                    base.append(h)
+                    added += 1
+                if added:
+                    logger.info("Harvester added %d new strategies (total: %d)", added, len(base))
+            except ImportError:
+                pass
+        self.strategies = base
         self.excluded_functions = excluded_functions or set()
         # Outcome of the last enumerate() call. Lets the caller distinguish
         # genuine "no strategy works" (proceed to GA) from "TSPU rate-limit

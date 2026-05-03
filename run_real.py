@@ -893,7 +893,7 @@ def main():
 
                 # Fast fallback: try top 5 enum strategies (~30s total)
                 from brain.enumerator import StrategyEnumerator
-                _fb_enum = StrategyEnumerator()
+                _fb_enum = StrategyEnumerator(include_harvested=True)
                 _fb_found = False
                 for _fb_i, _fb_s in enumerate(_fb_enum.strategies[:5]):
                     _fb_proc = _start_permanent_zapret(
@@ -1077,25 +1077,15 @@ def main():
                 classifier_strategies.append(s)
 
     # ─── Initialize tester ──────────────────────────────────────────
-    # Remove ONLY truly-untestable hosts from test_hosts:
-    #   - IP_BLOCK: nothing local can fix this (need a tunnel/proxy)
-    # We keep TLS_INTERFERENCE / HTTP2_STREAM_KILL / SNI_FILTERING etc.
-    # in the test_hosts list because we now have local primitives that
-    # can solve them (alpn_strip, tls_pad, multisplit). Removing them
-    # means watchdog never sees them fail again, host_solver never
-    # activates, and our targeted families (h2_downgrade, tls_morph)
-    # never get a chance to try.
-    # proxy_router puts TLS_INTERFERENCE in proxy_hosts by legacy
-    # convention; we ignore that here and keep them testable.
+    # 2026-05-03: stopped auto-removing IP_BLOCK hosts from test_hosts.
+    # Classifier marks Telegram/Discord IP_BLOCK when SOME of their IPs are
+    # blackholed at TSPU, but other IPs remain reachable with SNI filtering.
+    # SNI-fragmentation strategies (multisplit:pos=1) can pierce that.
+    # Removing them meant solver never tried — guaranteed failure.
+    # Keep them in; solver will fail-fast if truly unreachable.
     _ip_blocked_hosts = {h for h, r in blocked.items() if r.block_type == "IP_BLOCK"}
-    _untestable = _ip_blocked_hosts  # no longer adding _proxy_hosts
-    if _untestable:
-        _old_hosts = config.get("test_hosts", [])
-        _new_hosts = [h for h in _old_hosts if h not in _untestable]
-        if _new_hosts:
-            config["test_hosts"] = _new_hosts
-            logger.info("Test hosts updated: removed %s (IP-blocked, no local fix), keeping %s",
-                        _untestable, _new_hosts)
+    if _ip_blocked_hosts:
+        logger.info("IP_BLOCK detected on %s — keeping in test_hosts to try SNI-fragmentation", _ip_blocked_hosts)
     tester = ConnectionTester(config, mock=False, hostlist_path=hostlist)
     # Refresh hosts after IP-blocked filtering (watchdog uses this)
     hosts = config.get("test_hosts", hosts)
@@ -1591,7 +1581,7 @@ def main():
                 if not found_fix:
                     ui.step("Step 4: Fast enumeration...")
                     excluded = ai_feedback.get_excluded_functions()
-                    en = StrategyEnumerator(excluded_functions=excluded)
+                    en = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
                     _wd_thr = 0.40 if (tspu_profile and "tspu" in getattr(tspu_profile, 'dpi_type', '').lower()) else 0.55
                     er = en.enumerate(
                         tester, threshold=_wd_thr,
@@ -1712,7 +1702,7 @@ def main():
                 if kwargs.get("exclude_fake"):
                     forbid_genes = (forbid_genes or []) + ["fake"]
                 excluded = set(forbid_genes or []) | ai_feedback.get_excluded_functions()
-                enum = StrategyEnumerator(excluded_functions=excluded)
+                enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
                 best_fit, best_flags, best_name = 0.0, [], ""
                 # Stop permanent so shadow tester can use WinDivert
                 _was_running = _active_process is not None
@@ -1910,7 +1900,7 @@ def main():
                     # Throttled — try enum for faster strategy before applying
                     from brain.enumerator import StrategyEnumerator
                     excluded = ai_feedback.get_excluded_functions()
-                    enum = StrategyEnumerator(excluded_functions=excluded)
+                    enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
                     better = enum.enumerate(tester, threshold=verified + 0.05,
                         on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                     if better and better["fitness"] > verified:
@@ -2379,7 +2369,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                     print("  Running enumerator (anti-throttle first)...")
                     from brain.enumerator import StrategyEnumerator
                     excluded = ai_feedback.get_excluded_functions() if ai_feedback else set()
-                    enum = StrategyEnumerator(excluded_functions=excluded)
+                    enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
                     result = enum.enumerate(tester, threshold=0.40,
                         on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                     if result:
