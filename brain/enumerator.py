@@ -677,6 +677,7 @@ class StrategyEnumerator:
         threshold: float = 0.6,
         on_progress: Optional[callable] = None,
         on_result: Optional[callable] = None,
+        zero_streak_abort: int = 5,
     ) -> Optional[dict]:
         """Test strategies in order, return first passing threshold.
 
@@ -687,12 +688,17 @@ class StrategyEnumerator:
             tester: ConnectionTester instance (mock=False for real testing)
             threshold: minimum fitness to accept
             on_progress: callback(index, total, name, fitness) for UI updates
+            zero_streak_abort: stop enum after N consecutive 0-fitness results
+                (signals TSPU rate-limit / WinDivert wedged — continuing
+                wastes 30s/strategy and pollutes strategies_db with bogus
+                zeros). Default 5. Set 0 to disable.
 
         Returns:
             dict with "name", "flags", "fitness" or None if all fail
         """
         total = len(self.strategies)
         logger.info("Enumerating %d known strategies (threshold=%.2f)", total, threshold)
+        zero_streak = 0
 
         for i, strat in enumerate(self.strategies):
             name = strat["name"]
@@ -725,6 +731,23 @@ class StrategyEnumerator:
             if fitness >= threshold:
                 logger.info("Found working strategy: %s (fitness=%.3f)", name, fitness)
                 return {"name": name, "flags": flags, "fitness": fitness, "desc": strat.get("desc", "")}
+
+            # Rate-limit / wedge guard: if N strategies in a row return
+            # exactly 0.0, the network or WinDivert is wedged — every
+            # subsequent test will also be 0 and pollute strategies_db.
+            # Caller (watchdog/recovery) should back off rather than try GA.
+            if fitness == 0.0:
+                zero_streak += 1
+                if zero_streak_abort > 0 and zero_streak >= zero_streak_abort:
+                    logger.warning(
+                        "Enum aborted: %d consecutive 0-fitness results — "
+                        "TSPU rate-limit or WinDivert wedge suspected. "
+                        "Backing off; recovery should retry later.",
+                        zero_streak,
+                    )
+                    return None
+            else:
+                zero_streak = 0
 
         logger.warning("No strategy passed threshold %.2f", threshold)
         return None
