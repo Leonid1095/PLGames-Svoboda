@@ -543,6 +543,26 @@ class GenevaComposer:
 
         return ops
 
+    # Operators that define the *purpose* of a strategy and must not be
+    # silently removed/reordered by GA mutation. Removing one of these
+    # changes what the strategy is, not just how it's tuned, and starves
+    # the warm pool of the very gene we seeded for the block type.
+    _STRUCTURAL_OPS = {"fragment", "alpn_modify"}
+
+    # Operators that must run BEFORE any send/drop op (fragment) in the
+    # zapret2 lua-desync chain, because they modify desync.dis.payload
+    # in place and downstream ops consume the modified payload. If a
+    # fragment fires first it drops the original packet and these never
+    # see it. Order is therefore: leading payload-rewriters, then frags.
+    _LEADING_OPS = {"alpn_modify"}
+
+    def _normalize_order(self, ops: list[GenevaOp]) -> list[GenevaOp]:
+        """Hoist _LEADING_OPS to the front, preserving their relative order
+        and the relative order of the rest. Idempotent."""
+        leading = [op for op in ops if op.name in self._LEADING_OPS]
+        rest = [op for op in ops if op.name not in self._LEADING_OPS]
+        return leading + rest
+
     def mutate_strategy(self, ops: list[GenevaOp]) -> list[GenevaOp]:
         """Mutate an existing Geneva strategy (smarter than random GA mutation)."""
         ops = list(ops)
@@ -579,8 +599,15 @@ class GenevaComposer:
             ops.insert(0, random.choice(self._CONFUSION_BLOCKS))
 
         elif action == "remove_op" and len(ops) > 1:
-            # Don't remove the last fragment
-            candidates = [i for i, op in enumerate(ops) if op.name != "fragment"]
+            # Don't remove structural ops — they define what the strategy
+            # IS (alpn_modify, fragment). Mutate parameters instead, not
+            # purpose. Mutating those out of the warm-pool seed deletes
+            # the very h2_downgrade / fragmentation gene we wanted GA to
+            # explore around.
+            candidates = [
+                i for i, op in enumerate(ops)
+                if op.name not in self._STRUCTURAL_OPS
+            ]
             if candidates:
                 ops.pop(random.choice(candidates))
 
@@ -594,10 +621,23 @@ class GenevaComposer:
                 ops.insert(0, random.choice(self._ANTI_THROTTLE_BLOCKS))
 
         elif action == "swap_order" and len(ops) > 1:
-            i, j = random.sample(range(len(ops)), 2)
-            ops[i], ops[j] = ops[j], ops[i]
+            # Pick two non-leading ops to swap. Leading ops (alpn_modify)
+            # MUST stay at the front of the chain because zapret2 invokes
+            # --lua-desync calls in order on the same desync object, and
+            # alpn_strip mutates payload in place; if a fragment fires
+            # first it drops the original packet and alpn_strip never
+            # sees it. Order is therefore semantically load-bearing.
+            non_leading_idx = [
+                i for i, op in enumerate(ops) if op.name not in self._LEADING_OPS
+            ]
+            if len(non_leading_idx) >= 2:
+                i, j = random.sample(non_leading_idx, 2)
+                ops[i], ops[j] = ops[j], ops[i]
 
-        return ops
+        # Always re-normalize: ensure leading ops are at the front even if
+        # an earlier action (add_confusion, add_anti_throttle, insertion)
+        # placed something ahead of them.
+        return self._normalize_order(ops)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
