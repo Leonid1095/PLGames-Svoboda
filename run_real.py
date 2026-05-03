@@ -601,11 +601,20 @@ def _quick_connectivity_check(hosts: list[str], timeout: int = 5) -> dict[str, b
 
 
 def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) -> dict:
-    """Curl test — follows redirects, checks body size. Returns detailed result.
+    """Curl test — follows redirects, measures REAL throughput, not just HTTP code.
 
-    Unlike shadow tester (speed-optimized), this does a REAL browser-like check:
-    - Follows redirects (-L) so youtube.com→www.youtube.com is actually tested
-    - Checks body size to detect TSPU block pages (real pages >1KB)
+    Critical for TSPU detection: a throttled connection returns HTTP 200 but
+    transfers at <10 KB/s — counts as success in plain HTTP-code logic but is
+    effectively unusable. We measure speed_download (bytes/sec) and TTFB so
+    the watchdog can distinguish:
+      - working    : HTTP 200 + body OK + throughput >= 100 KB/s
+      - throttled  : HTTP 200 + body OK + throughput <  10 KB/s (TSPU shaping)
+      - degraded   : HTTP 200 + body OK + 10 <= throughput < 100 KB/s
+      - blocked    : HTTP error / TLS error / blockpage / no body
+
+    Throttled MUST be treated as fail upstream — otherwise the per-host solver
+    never activates because curl reports HTTP 200 and streak_fail stays at 0,
+    leaving the user with a "working" connection that is unusable in practice.
     """
     is_win = platform.system() == "Windows"
     _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
@@ -615,7 +624,8 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
             "--max-time", str(timeout),
             f"https://{host}",
             "-o", "NUL" if is_win else "/dev/null",
-            "-w", "%{http_code}|%{time_total}|%{size_download}",
+            # Order: http_code | total_time | body_size | speed_download (B/s) | ttfb (s)
+            "-w", "%{http_code}|%{time_total}|%{size_download}|%{speed_download}|%{time_starttransfer}",
         ]
         if follow_redirects:
             cmd.insert(2, "-L")
@@ -627,6 +637,8 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
         http_code = 0
         latency_ms = 0.0
         body_size = 0
+        throughput_bps = 0.0
+        ttfb_ms = 0.0
         try:
             http_code = int(parts[0])
         except (ValueError, IndexError):
@@ -639,6 +651,16 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
             body_size = int(float(parts[2]))
         except (ValueError, IndexError):
             pass
+        try:
+            throughput_bps = float(parts[3])
+        except (ValueError, IndexError):
+            pass
+        try:
+            ttfb_ms = round(float(parts[4]) * 1000, 1)
+        except (ValueError, IndexError):
+            pass
+
+        throughput_kbps = throughput_bps / 1024.0
 
         # Success requires: valid HTTP code + actual content received
         # A TSPU block page or empty response is NOT success
@@ -648,7 +670,23 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
         if http_code in {200, 403} and body_size < 512:
             code_ok = False  # likely a TSPU block page or failed download
 
+        # Throughput-aware degradation tiers. TSPU shaping typically caps at
+        # 10-30 KB/s; healthy international CDN traffic from RU is usually
+        # 100+ KB/s. Below 10 KB/s anything beyond a tiny page is unusable.
+        # TTFB > 5s on a small request also signals TSPU intervention.
+        is_throttled = False
+        if code_ok and body_size >= 512:
+            if throughput_kbps < 10 and body_size > 0:
+                # Real success but at unusable speed — formally OK, semantically fail
+                is_throttled = True
+            elif ttfb_ms > 5000:
+                # Took >5s to start data — DPI shaping the handshake/early data
+                is_throttled = True
+
+        # `success` = formal HTTP-level OK; `usable` = OK AND not throttled.
+        # Watchdog should accumulate streak_fail on (not usable), not (not success).
         success = code_ok
+        usable = code_ok and not is_throttled
 
         # Classify error
         error_type = ""
@@ -665,16 +703,25 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
                 error_type = "blockpage"
             elif result.returncode != 0:
                 error_type = "error"
+        elif is_throttled:
+            error_type = "throttled"
 
         return {
-            "success": success, "http_code": http_code,
-            "latency_ms": latency_ms, "error_type": error_type,
+            "success": success, "usable": usable,
+            "http_code": http_code,
+            "latency_ms": latency_ms, "ttfb_ms": ttfb_ms,
+            "throughput_kbps": round(throughput_kbps, 1),
+            "error_type": error_type,
             "body_size": body_size,
         }
     except subprocess.TimeoutExpired:
-        return {"success": False, "http_code": 0, "latency_ms": timeout * 1000, "error_type": "timeout", "body_size": 0}
+        return {"success": False, "usable": False, "http_code": 0,
+                "latency_ms": timeout * 1000, "ttfb_ms": 0,
+                "throughput_kbps": 0.0, "error_type": "timeout", "body_size": 0}
     except Exception:
-        return {"success": False, "http_code": 0, "latency_ms": 0, "error_type": "error", "body_size": 0}
+        return {"success": False, "usable": False, "http_code": 0,
+                "latency_ms": 0, "ttfb_ms": 0,
+                "throughput_kbps": 0.0, "error_type": "error", "body_size": 0}
 
 
 def main():
@@ -1209,34 +1256,43 @@ def main():
 
             # ── Health check ──────────────────────────────────────────
             now = datetime.now().strftime("%H:%M")
-            host_statuses = []  # list[(host_short, success, latency_ms, error_type)]
+            host_statuses = []  # list[(host_short, usable, latency_ms, throughput_kbps, err)]
             for host in hosts:
                 r = _curl_check_one(host, timeout=10)
+                # CRITICAL: log `usable` (HTTP OK + throughput >= 10 KB/s + TTFB < 5s)
+                # not `success` (just HTTP OK). Otherwise an 8s-throttled HTTP 200
+                # accumulates as a healthy result, streak_fail never grows, and the
+                # entire per-host solver / warm-pool / GA pipeline sleeps forever.
                 analytics.log_test_result(
                     strategy_id=_wd_sid, host=host,
-                    http_code=r["http_code"], success=r["success"],
+                    http_code=r["http_code"], success=r["usable"],
                     latency_ms=r["latency_ms"], error_type=r["error_type"],
                 )
                 short = host.replace(".com", "").replace(".discordapp", "")
-                # Tag throttled successes (>=5s) as SLOW so UI can warn
-                lat = r["latency_ms"]
                 err = r["error_type"] or ""
-                if r["success"] and lat >= 5000:
-                    err = "THROTTLED"
-                host_statuses.append((short, r["success"], lat, err))
+                lat = r["latency_ms"]
+                tp = r.get("throughput_kbps", 0.0)
+                # error_type already set to "throttled" by _curl_check_one when
+                # HTTP-OK but throughput < 10 KB/s OR TTFB > 5s
+                host_statuses.append((short, r["usable"], lat, tp, err))
 
             health = analytics.get_all_hosts_health(hosts, minutes=10)
             overall = health["overall_rate"]
             degraded = health.get("degraded", [])
 
-            # Colored live status line: green OK / yellow SLOW / red FAIL+reason
+            # Colored live status line — surfaces THROUGHPUT, not just status code.
+            # green OK (good speed) / yellow SLOW (throttled) / red FAIL+reason.
             health_color = ui.C.GREEN if overall >= 0.8 else ui.C.YELLOW if overall >= 0.5 else ui.C.RED
             parts = []
-            for short, ok_, latency_ms, err in host_statuses:
-                if ok_ and not err:
-                    parts.append(f"{ui.C.GREEN}{short}:OK({latency_ms:.0f}ms){ui.C.RESET}")
-                elif ok_ and err == "THROTTLED":
-                    parts.append(f"{ui.C.YELLOW}{short}:SLOW({latency_ms:.0f}ms){ui.C.RESET}")
+            for short, usable_, latency_ms, tp_kbps, err in host_statuses:
+                if usable_:
+                    # Show throughput when we have a meaningful sample
+                    if tp_kbps > 0:
+                        parts.append(f"{ui.C.GREEN}{short}:OK({tp_kbps:.0f}KB/s){ui.C.RESET}")
+                    else:
+                        parts.append(f"{ui.C.GREEN}{short}:OK({latency_ms:.0f}ms){ui.C.RESET}")
+                elif err == "throttled":
+                    parts.append(f"{ui.C.YELLOW}{short}:SLOW({tp_kbps:.0f}KB/s,{latency_ms:.0f}ms){ui.C.RESET}")
                 else:
                     parts.append(f"{ui.C.RED}{short}:{(err or 'FAIL').upper()}{ui.C.RESET}")
             print(f"  {ui.C.GRAY}[{now}]{ui.C.RESET} {' | '.join(parts)}  {health_color}health={overall:.0%}{ui.C.RESET}")
@@ -1307,12 +1363,31 @@ def main():
                     print(f"  [!] {host}: {hd['streak_fail']} consecutive failures")
 
             # ── Per-host solving (partial failures, overall OK) ───────
-            pfails = [
-                h for h in hosts
-                if health["hosts"].get(h, {}).get("streak_fail", 0) >= 3
-                and not needs_recovery
-                and (h not in blocked or blocked[h].block_type != "TLS_INTERFERENCE")
-            ]
+            # Two trigger conditions, either is sufficient:
+            #   1) streak_fail >= 3 (legacy: host has been failing health checks)
+            #   2) classifier marked it as actively blocked with confidence >= 0.7
+            #      (new: don't wait for 3 cycles when we already KNOW it's blocked)
+            # TLS_INTERFERENCE used to be excluded because no local strategy could
+            # fix it — proxy was the only option. Now we have tls_pad/tls_morph
+            # family (pure local TLS payload obfuscation), so include it. Same for
+            # HTTP2_STREAM_KILL, RST_INJECTION, SNI_FILTERING.
+            _LOCAL_BYPASSABLE = {
+                "TLS_INTERFERENCE", "HTTP2_STREAM_KILL",
+                "RST_INJECTION", "SNI_FILTERING", "THROTTLING",
+            }
+            pfails = []
+            for h in hosts:
+                if needs_recovery:
+                    continue  # full recovery cascade will handle these
+                streak = health["hosts"].get(h, {}).get("streak_fail", 0)
+                ba = blocked.get(h)
+                ba_confident = (
+                    ba is not None
+                    and getattr(ba, "block_type", "") in _LOCAL_BYPASSABLE
+                    and getattr(ba, "confidence", 0.0) >= 0.7
+                )
+                if streak >= 3 or ba_confident:
+                    pfails.append(h)
             if pfails:
                 from brain.host_solver import HostSolver
                 ui.separator()
@@ -2194,15 +2269,20 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
 
         for host in hosts:
             r = _curl_check_one(host, timeout=10)
-            # Log to analytics (no strategy active yet, use "baseline")
+            # Log `usable` (throughput-aware), not `success` (HTTP-code-only) —
+            # see _curl_check_one docstring for why this matters.
             analytics.log_test_result(
                 strategy_id="baseline", host=host,
-                http_code=r["http_code"], success=r["success"],
+                http_code=r["http_code"], success=r.get("usable", r["success"]),
                 latency_ms=r["latency_ms"], error_type=r["error_type"],
             )
             short = host.replace(".com", "")
-            if r["success"]:
-                status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
+            tp = r.get("throughput_kbps", 0.0)
+            if r.get("usable", r["success"]):
+                if tp > 0:
+                    status_parts.append(f"{short}:OK({tp:.0f}KB/s)")
+                else:
+                    status_parts.append(f"{short}:OK({r['latency_ms']:.0f}ms)")
             else:
                 err = r["error_type"] or "FAIL"
                 status_parts.append(f"{short}:{err.upper()}")
