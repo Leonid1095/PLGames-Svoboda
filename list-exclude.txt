@@ -94,22 +94,27 @@ office.net
 sharepoint.com
 onedrive.com
 skype.com
-xbox.com
-xboxlive.com
 update.microsoft.com
 download.microsoft.com
 windowsupdate.com
-# === Steam / gaming ===
-steamcommunity.com
-steamusercontent.com
-steamcontent.com
+# === Anti-cheat (touching = bans) ===
+easyanticheat.net
+easyanticheat.com
+battleye.com
+punkbuster.com
+riotclientservices.com
+vanguard.riotgames.com
+esea.net
+faceit.com
+gameguard.nprotect.com
+xignite.com
+# === Game telemetry / matchmaking infra (sensitive to TLS mods) ===
 steamserver.net
 valvesoftware.com
-epicgames.dev
-ubisoft.com
-ubi.com
-ea.com
-origin.com
-battlenet.com.cn
-battle.net
-blizzard.com
+csgo.steamserver.net
+ubisoft-ds.com
+denuvo.com
+amazongames.com
+# === Critical CDNs that anti-cheat / launcher uses ===
+edgecast.com
+incapdns.net
