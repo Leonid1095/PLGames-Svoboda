@@ -131,6 +131,43 @@ pre code {
   color: var(--text);
 }
 
+.lang-toggle {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 0.4rem 0.7rem;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  letter-spacing: 0.03em;
+}
+
+.lang-toggle:hover {
+  background: var(--bg-card-hover);
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.lang-current {
+  color: var(--accent);
+}
+
+.lang-other {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.lang-other::before {
+  content: "↔ ";
+  opacity: 0.5;
+}
+
 /* ─── Hero ─── */
 
 .hero {

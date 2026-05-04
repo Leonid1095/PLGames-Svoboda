@@ -1,14 +1,14 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="PLGames Svoboda — autonomous DPI bypass agent. Self-adapting, AI-powered, no VPN tunnel. Pure local packet manipulation.">
-<meta name="keywords" content="DPI bypass, zapret, Russia, TSPU, Discord, YouTube, Telegram, no VPN">
+<meta name="keywords" content="DPI bypass, zapret, Russia, TSPU, Discord, YouTube, Telegram, no VPN, обход блокировок">
 <meta property="og:title" content="PLGames Svoboda — Autonomous DPI Bypass">
 <meta property="og:description" content="Your internet, your rules. AI-powered, self-adapting, community-driven. No VPN.">
 <meta property="og:type" content="website">
-<title>PLGames Svoboda — Autonomous DPI Bypass</title>
+<title data-ru="PLGames Svoboda — Автономный обход DPI">PLGames Svoboda — Autonomous DPI Bypass</title>
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -17,31 +17,35 @@
   <nav class="nav">
     <div class="logo">🌐 <strong>Svoboda</strong></div>
     <div class="nav-links">
-      <a href="#features">Features</a>
-      <a href="#chain">How it works</a>
-      <a href="#roadmap">Roadmap</a>
+      <a href="#features" data-ru="Возможности">Features</a>
+      <a href="#chain" data-ru="Как работает">How it works</a>
+      <a href="#roadmap" data-ru="План">Roadmap</a>
       <a href="https://github.com/Leonid1095/PLGames-Svoboda" target="_blank" rel="noopener">GitHub</a>
+      <button class="lang-toggle" id="langToggle" type="button" aria-label="Switch language">
+        <span class="lang-current">EN</span>
+        <span class="lang-other">RU</span>
+      </button>
     </div>
   </nav>
 
   <div class="hero-content">
-    <div class="badge">⚡ NEW · AI Strategy Engineer + Live Harvester</div>
-    <h1>Your internet,<br><span class="gradient">your rules.</span></h1>
-    <p class="hero-sub">
+    <div class="badge" data-ru="⚡ НОВОЕ · AI-инженер стратегий + Live Harvester">⚡ NEW · AI Strategy Engineer + Live Harvester</div>
+    <h1 data-ru='Твой интернет,<br><span class="gradient">твои правила.</span>'>Your internet,<br><span class="gradient">your rules.</span></h1>
+    <p class="hero-sub" data-ru='Автономный агент обхода DPI. AI-powered, самоадаптирующийся, с коллективным разумом сообщества.<br><strong>Это не VPN.</strong> Никаких туннелей, своих серверов или подменного IP.'>
       Autonomous DPI bypass agent. AI-powered, self-adapting, community-driven.<br>
       <strong>This is not a VPN.</strong> No tunnel, no proxy server, no shared IP.
     </p>
     <div class="hero-cta">
-      <a href="https://github.com/Leonid1095/PLGames-Svoboda" class="btn btn-primary" target="_blank" rel="noopener">
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda" class="btn btn-primary" target="_blank" rel="noopener" data-ru="⬇ Скачать с GitHub">
         ⬇ Download from GitHub
       </a>
-      <a href="#chain" class="btn btn-ghost">See how it works</a>
+      <a href="#chain" class="btn btn-ghost" data-ru="Как работает">See how it works</a>
     </div>
     <div class="hero-stats">
-      <div><strong>184</strong><span>tests passing</span></div>
-      <div><strong>75+</strong><span>built-in strategies</span></div>
-      <div><strong>9+</strong><span>auto-harvested daily</span></div>
-      <div><strong>7</strong><span>fallback layers</span></div>
+      <div><strong>184</strong><span data-ru="теста пройдено">tests passing</span></div>
+      <div><strong>75+</strong><span data-ru="встроенных стратегий">built-in strategies</span></div>
+      <div><strong>9+</strong><span data-ru="подтягивается автоматически">auto-harvested daily</span></div>
+      <div><strong>7</strong><span data-ru="слоёв обхода">fallback layers</span></div>
     </div>
   </div>
 </header>
@@ -52,12 +56,12 @@
   <div class="container">
     <div class="two-col">
       <div>
-        <h2>The problem</h2>
-        <p class="lead">
+        <h2 data-ru="Проблема">The problem</h2>
+        <p class="lead" data-ru="В России ТСПУ блокирует Discord, YouTube, Twitter, Instagram, Facebook, Telegram, Roblox, Riot Games, Crunchyroll — список растёт еженедельно.">
           In Russia, TSPU blocks Discord, YouTube, Twitter, Instagram, Facebook,
           Telegram, Roblox, Riot Games, Crunchyroll — the list grows weekly.
         </p>
-        <p>
+        <p data-ru="Существующие инструменты (GoodbyeDPI, Zapret, ByeDPI) требуют от тебя быть сетевым инженером: выбрать конфиг, поправить флаги, перезапустить при каждой смене провайдера. Когда ТСПУ меняет правила — твой конфиг бесполезен, и ты в 2 ночи ищешь новые флаги в Telegram-каналах.">
           Existing tools (GoodbyeDPI, Zapret, ByeDPI) need you to be a network engineer:
           pick a config, edit flags, restart on every ISP change. When TSPU changes
           rules — your config is suddenly useless and you need to find new flags
@@ -65,17 +69,17 @@
         </p>
       </div>
       <div>
-        <h2>The solution</h2>
-        <p class="lead">
+        <h2 data-ru="Решение">The solution</h2>
+        <p class="lead" data-ru="Svoboda — автономный. Ты запускаешь — он делает остальное.">
           Svoboda is autonomous. You launch it. It does the rest.
         </p>
         <ul class="check-list">
-          <li>Detects your ISP and DPI type</li>
-          <li>Tries community strategies first (instant if anyone solved it)</li>
-          <li>Falls through 7 layers of fallback automatically</li>
-          <li>Asks an LLM to invent new flags if nothing else works</li>
-          <li>Monitors 24/7 and re-adapts when TSPU changes rules</li>
-          <li>Shares wins with the community anonymously</li>
+          <li data-ru="Определяет провайдера и тип DPI">Detects your ISP and DPI type</li>
+          <li data-ru="Сначала пробует стратегии сообщества (мгновенно если кто-то уже решил)">Tries community strategies first (instant if anyone solved it)</li>
+          <li data-ru="Автоматически проходит через 7 слоёв резервных вариантов">Falls through 7 layers of fallback automatically</li>
+          <li data-ru="Спрашивает LLM придумать новые флаги если ничего не работает">Asks an LLM to invent new flags if nothing else works</li>
+          <li data-ru="Следит 24/7 и переподстраивается когда ТСПУ меняет правила">Monitors 24/7 and re-adapts when TSPU changes rules</li>
+          <li data-ru="Анонимно делится победами с сообществом">Shares wins with the community anonymously</li>
         </ul>
       </div>
     </div>
@@ -84,13 +88,13 @@
 
 <section id="features" class="section">
   <div class="container">
-    <h2 class="section-title">What it unblocks</h2>
-    <p class="section-sub">Curated hostlist — only services genuinely blocked in RU.</p>
+    <h2 class="section-title" data-ru="Что разблокирует">What it unblocks</h2>
+    <p class="section-sub" data-ru="Курируемый список — только сервисы, реально заблокированные в РФ.">Curated hostlist — only services genuinely blocked in RU.</p>
 
     <div class="grid-3">
       <div class="card">
         <div class="card-icon">💬</div>
-        <h3>Social & Messaging</h3>
+        <h3 data-ru="Соцсети и мессенджеры">Social & Messaging</h3>
         <ul>
           <li>Discord</li>
           <li>Telegram</li>
@@ -103,7 +107,7 @@
       </div>
       <div class="card">
         <div class="card-icon">🎮</div>
-        <h3>Games</h3>
+        <h3 data-ru="Игры">Games</h3>
         <ul>
           <li>Riot Games · LoL · Valorant</li>
           <li>Roblox</li>
@@ -116,9 +120,9 @@
       </div>
       <div class="card">
         <div class="card-icon">🎬</div>
-        <h3>Streaming</h3>
+        <h3 data-ru="Стриминг">Streaming</h3>
         <ul>
-          <li>YouTube (throttle bypass)</li>
+          <li data-ru="YouTube (обход тротлинга)">YouTube (throttle bypass)</li>
           <li>Netflix · Disney+ · HBO Max</li>
           <li>Crunchyroll · Funimation</li>
           <li>Spotify · Twitch</li>
@@ -132,62 +136,62 @@
 
 <section id="chain" class="section section-dark">
   <div class="container">
-    <h2 class="section-title">The Smart Bypass Chain</h2>
-    <p class="section-sub">When something is blocked, Svoboda escalates through 7 layers — automatically.</p>
+    <h2 class="section-title" data-ru="Умная цепочка обхода">The Smart Bypass Chain</h2>
+    <p class="section-sub" data-ru="Когда что-то заблокировано, Svoboda проходит 7 слоёв — автоматически.">When something is blocked, Svoboda escalates through 7 layers — automatically.</p>
 
     <div class="chain">
       <div class="layer">
         <div class="layer-num">1</div>
         <div class="layer-body">
-          <h4>Community Database</h4>
-          <p>Another user on your ISP already found a strategy → applied in 5 seconds.</p>
+          <h4 data-ru="База сообщества">Community Database</h4>
+          <p data-ru="Другой пользователь на твоём провайдере уже нашёл стратегию → применили за 5 секунд.">Another user on your ISP already found a strategy → applied in 5 seconds.</p>
         </div>
       </div>
       <div class="layer">
         <div class="layer-num">2</div>
         <div class="layer-body">
-          <h4>Local Cache</h4>
-          <p>Strategy that worked on this machine before — verified and re-applied.</p>
+          <h4 data-ru="Локальный кэш">Local Cache</h4>
+          <p data-ru="Стратегия которая работала на этой машине раньше — проверяем и применяем.">Strategy that worked on this machine before — verified and re-applied.</p>
         </div>
       </div>
       <div class="layer">
         <div class="layer-num">3</div>
         <div class="layer-body">
-          <h4>AI Advisor</h4>
-          <p>Top-4 from learned memory, ranked by past fitness on similar ISPs.</p>
+          <h4 data-ru="AI-советник">AI Advisor</h4>
+          <p data-ru="Топ-4 из обученной памяти, отранжированные по прошлой успешности на похожих провайдерах.">Top-4 from learned memory, ranked by past fitness on similar ISPs.</p>
         </div>
       </div>
       <div class="layer">
         <div class="layer-num">4</div>
         <div class="layer-body">
-          <h4>Enumerator</h4>
-          <p>75+ hardcoded + live-harvested configs from <code>Flowseal/zapret-discord-youtube</code>.</p>
+          <h4 data-ru="Энумератор">Enumerator</h4>
+          <p data-ru="75+ встроенных + автоматически подтянутые конфиги из <code>Flowseal/zapret-discord-youtube</code>.">75+ hardcoded + live-harvested configs from <code>Flowseal/zapret-discord-youtube</code>.</p>
         </div>
       </div>
       <div class="layer layer-new">
         <div class="layer-num">5</div>
         <div class="layer-body">
-          <h4>AI Strategy Engineer <span class="tag-new">NEW</span></h4>
-          <p>LLM analyzes raw symptoms (curl exit codes, latency, ISP) and invents a NOVEL flag combination not in any list.</p>
+          <h4 data-ru='AI-инженер стратегий <span class="tag-new">НОВОЕ</span>'>AI Strategy Engineer <span class="tag-new">NEW</span></h4>
+          <p data-ru="LLM анализирует сырые симптомы (curl exit codes, latency, провайдер) и придумывает НОВУЮ комбинацию флагов которой нет в списке.">LLM analyzes raw symptoms (curl exit codes, latency, ISP) and invents a NOVEL flag combination not in any list.</p>
         </div>
       </div>
       <div class="layer layer-new">
         <div class="layer-num">6</div>
         <div class="layer-body">
-          <h4>ByeDPI Layer 2 <span class="tag-new">NEW</span></h4>
-          <p>SOCKS5 userspace desync — different attack model than packet-level zapret. Often pierces TSPU MITM.</p>
+          <h4 data-ru='ByeDPI Layer 2 <span class="tag-new">НОВОЕ</span>'>ByeDPI Layer 2 <span class="tag-new">NEW</span></h4>
+          <p data-ru="SOCKS5 на уровне приложений — другая модель атаки чем packet-level zapret. Часто пробивает там где TSPU MITM.">SOCKS5 userspace desync — different attack model than packet-level zapret. Often pierces TSPU MITM.</p>
         </div>
       </div>
       <div class="layer">
         <div class="layer-num">7</div>
         <div class="layer-body">
-          <h4>Genetic Evolution</h4>
-          <p>Geneva-style mutations of the best strategy found so far — last resort.</p>
+          <h4 data-ru="Генетическая эволюция">Genetic Evolution</h4>
+          <p data-ru="Geneva-style мутации лучшей найденной стратегии — последний рубеж.">Geneva-style mutations of the best strategy found so far — last resort.</p>
         </div>
       </div>
     </div>
 
-    <p class="footnote">
+    <p class="footnote" data-ru="После того как стратегия найдена — она мониторится 24/7, анонимно отправляется в общую базу и перетестируется при деградации связи.">
       Once a strategy is found, it's monitored 24/7, shared anonymously with the
       community DB, and re-tested if connectivity degrades.
     </p>
@@ -196,7 +200,7 @@
 
 <section class="section">
   <div class="container">
-    <h2 class="section-title">vs. Other tools</h2>
+    <h2 class="section-title" data-ru="Сравнение с другими">vs. Other tools</h2>
 
     <div class="table-wrap">
       <table class="comparison">
@@ -211,19 +215,19 @@
           </tr>
         </thead>
         <tbody>
-          <tr><td>Auto-detects ISP & DPI</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          <tr><td>Self-finds strategy</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          <tr><td>Community sync</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          <tr><td>Live config harvesting</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>manual</td></tr>
-          <tr><td>AI generates new strategies</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          <tr><td>Self-adapts to changes</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          <tr><td>Cross-host learning</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
-          <tr><td>Body verification</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Авто-детект провайдера и DPI">Auto-detects ISP & DPI</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Сам находит стратегию">Self-finds strategy</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Синк с сообществом">Community sync</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Live-подтяжка конфигов">Live config harvesting</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td data-ru="вручную">manual</td></tr>
+          <tr><td data-ru="AI генерирует новые стратегии">AI generates new strategies</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Сам адаптируется к изменениям">Self-adapts to changes</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Кросс-хост обучение">Cross-host learning</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
+          <tr><td data-ru="Проверка тела ответа">Body verification</td><td class="yes">✓</td><td>—</td><td>—</td><td>—</td><td>—</td></tr>
         </tbody>
       </table>
     </div>
 
-    <blockquote>
+    <blockquote data-ru="Другие инструменты дают тебе конфиг. <strong>Svoboda <em>и есть</em> конфиг — он пишет себя сам.</strong>">
       Other tools give you a config. <strong>Svoboda <em>is</em> the config — it writes itself.</strong>
     </blockquote>
   </div>
@@ -231,48 +235,48 @@
 
 <section id="roadmap" class="section section-dark">
   <div class="container">
-    <h2 class="section-title">Roadmap</h2>
+    <h2 class="section-title" data-ru="План разработки">Roadmap</h2>
 
     <div class="roadmap">
 
       <div class="roadmap-col">
-        <h3 class="status-shipped">✓ Shipped</h3>
+        <h3 class="status-shipped" data-ru="✓ Готово">✓ Shipped</h3>
         <ul>
-          <li>7-layer escalation chain</li>
-          <li>Live Strategy Harvester (Flowseal sync)</li>
-          <li>AI Strategy Engineer (LLM novel flags)</li>
-          <li>Pattern Transfer (cross-host learning)</li>
-          <li>ProbeEye continuous probing</li>
-          <li>Block-type aware dispatcher</li>
-          <li>ByeDPI Layer 2 fallback</li>
-          <li>Hostlist v2 — games & streaming</li>
+          <li data-ru="7-слойная цепочка эскалации">7-layer escalation chain</li>
+          <li data-ru="Live Strategy Harvester (синк с Flowseal)">Live Strategy Harvester (Flowseal sync)</li>
+          <li data-ru="AI Strategy Engineer (новые флаги от LLM)">AI Strategy Engineer (LLM novel flags)</li>
+          <li data-ru="Pattern Transfer (кросс-хост обучение)">Pattern Transfer (cross-host learning)</li>
+          <li data-ru="ProbeEye — постоянное активное зондирование">ProbeEye continuous probing</li>
+          <li data-ru="Диспетчер с учётом типа блокировки">Block-type aware dispatcher</li>
+          <li data-ru="ByeDPI Layer 2 fallback">ByeDPI Layer 2 fallback</li>
+          <li data-ru="Hostlist v2 — игры и стриминг">Hostlist v2 — games & streaming</li>
         </ul>
       </div>
 
       <div class="roadmap-col">
-        <h3 class="status-progress">⊙ In progress</h3>
+        <h3 class="status-progress" data-ru="⊙ В работе">⊙ In progress</h3>
         <ul>
-          <li>Discord TSPU MITM bypass</li>
-          <li>Telegram on partial-IP-block ISPs</li>
-          <li>Server: per-ISP strategy blocklist</li>
-          <li>Server: AI proxy fallback chain</li>
-          <li>Server: curated hostlist endpoint</li>
-          <li>Server: TLS_MITM_INJECTION block type</li>
-          <li>Anti-spam on telemetry reports</li>
+          <li data-ru="Discord — обход TSPU MITM">Discord TSPU MITM bypass</li>
+          <li data-ru="Telegram на провайдерах с частичным IP-блоком">Telegram on partial-IP-block ISPs</li>
+          <li data-ru="Сервер: blocklist стратегий по провайдеру">Server: per-ISP strategy blocklist</li>
+          <li data-ru="Сервер: AI proxy fallback chain">Server: AI proxy fallback chain</li>
+          <li data-ru="Сервер: курируемый hostlist endpoint">Server: curated hostlist endpoint</li>
+          <li data-ru="Сервер: тип блокировки TLS_MITM_INJECTION">Server: TLS_MITM_INJECTION block type</li>
+          <li data-ru="Анти-спам на телеметрии">Anti-spam on telemetry reports</li>
         </ul>
       </div>
 
       <div class="roadmap-col">
-        <h3 class="status-planned">○ Planned</h3>
+        <h3 class="status-planned" data-ru="○ Запланировано">○ Planned</h3>
         <ul>
-          <li>Anomaly Detector (DPI-shift detection)</li>
-          <li>Adaptive Rotation among top-N strategies</li>
-          <li>Federated meta-learning (cross-ISP)</li>
-          <li>Live LLM strategy injection (no restart)</li>
-          <li>Tray UI with traffic graph</li>
-          <li>Android client (VpnService)</li>
-          <li>Linux daemon (nfqws2)</li>
-          <li>macOS support</li>
+          <li data-ru="Anomaly Detector (детект смены DPI)">Anomaly Detector (DPI-shift detection)</li>
+          <li data-ru="Adaptive Rotation среди топ-N стратегий">Adaptive Rotation among top-N strategies</li>
+          <li data-ru="Federated meta-learning (кросс-провайдер)">Federated meta-learning (cross-ISP)</li>
+          <li data-ru="Live LLM-инжект стратегий (без рестарта)">Live LLM strategy injection (no restart)</li>
+          <li data-ru="Tray UI с графиком трафика">Tray UI with traffic graph</li>
+          <li data-ru="Android-клиент (VpnService)">Android client (VpnService)</li>
+          <li data-ru="Linux-демон (nfqws2)">Linux daemon (nfqws2)</li>
+          <li data-ru="Поддержка macOS">macOS support</li>
         </ul>
       </div>
 
@@ -282,8 +286,8 @@
 
 <section id="install" class="section">
   <div class="container">
-    <h2 class="section-title">Get started</h2>
-    <p class="section-sub">Windows 10+, Python 3.11+, Administrator rights.</p>
+    <h2 class="section-title" data-ru="Установка">Get started</h2>
+    <p class="section-sub" data-ru="Windows 10+, Python 3.11+, права администратора.">Windows 10+, Python 3.11+, Administrator rights.</p>
 
     <div class="install-card">
 <pre><code>git clone https://github.com/Leonid1095/PLGames-Svoboda.git
@@ -293,15 +297,15 @@ run.bat</code></pre>
     </div>
 
     <div class="install-note">
-      <strong>Internet stuck?</strong>
-      <code>fix_internet.bat</code> — kills winws2, removes QUIC block, clears proxy, flushes DNS.
+      <strong data-ru="Интернет сломался?">Internet stuck?</strong>
+      <span data-ru="<code>fix_internet.bat</code> — убивает winws2, снимает QUIC-блок, очищает прокси, сбрасывает DNS."><code>fix_internet.bat</code> — kills winws2, removes QUIC block, clears proxy, flushes DNS.</span>
     </div>
 
     <div class="hero-cta" style="margin-top: 2rem;">
-      <a href="https://github.com/Leonid1095/PLGames-Svoboda" class="btn btn-primary" target="_blank" rel="noopener">
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda" class="btn btn-primary" target="_blank" rel="noopener" data-ru="Открыть репозиторий">
         Open repository
       </a>
-      <a href="https://new.donatepay.ru/@lenya" class="btn btn-support" target="_blank" rel="noopener">
+      <a href="https://new.donatepay.ru/@lenya" class="btn btn-support" target="_blank" rel="noopener" data-ru="💛 Поддержать проект">
         💛 Support the project
       </a>
     </div>
@@ -310,13 +314,13 @@ run.bat</code></pre>
 
 <section class="section section-dark">
   <div class="container">
-    <h2 class="section-title">Privacy</h2>
+    <h2 class="section-title" data-ru="Приватность">Privacy</h2>
     <ul class="check-list center-list">
-      <li>Zero personal data collected — no IP, MAC, hostname, browsing history</li>
-      <li>Anonymous telemetry — only ISP type + strategy fitness score</li>
-      <li>Server is intelligence-only — never routes your traffic</li>
-      <li>All API keys server-side — never embedded in client binary</li>
-      <li>Full opt-out: <code>"share": false</code> in config.json</li>
+      <li data-ru="Никаких личных данных не собирается — ни IP, ни MAC, ни имени хоста, ни истории">Zero personal data collected — no IP, MAC, hostname, browsing history</li>
+      <li data-ru="Анонимная телеметрия — только тип провайдера и оценка стратегии">Anonymous telemetry — only ISP type + strategy fitness score</li>
+      <li data-ru="Сервер только для интеллекта — твой трафик НЕ маршрутизируется">Server is intelligence-only — never routes your traffic</li>
+      <li data-ru="Все API-ключи на сервере — нигде не зашиты в клиент">All API keys server-side — never embedded in client binary</li>
+      <li data-ru='Полный отказ от телеметрии: <code>"share": false</code> в config.json'>Full opt-out: <code>"share": false</code> in config.json</li>
     </ul>
   </div>
 </section>
@@ -331,15 +335,76 @@ run.bat</code></pre>
     </div>
     <div class="footer-links">
       <a href="https://github.com/Leonid1095/PLGames-Svoboda" target="_blank" rel="noopener">GitHub</a>
-      <a href="https://github.com/Leonid1095/PLGames-Svoboda/blob/main/ROADMAP.md" target="_blank" rel="noopener">Roadmap</a>
-      <a href="https://github.com/Leonid1095/PLGames-Svoboda/issues" target="_blank" rel="noopener">Issues</a>
-      <a href="https://new.donatepay.ru/@lenya" target="_blank" rel="noopener">Donate</a>
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda/blob/main/ROADMAP.md" target="_blank" rel="noopener" data-ru="План">Roadmap</a>
+      <a href="https://github.com/Leonid1095/PLGames-Svoboda/issues" target="_blank" rel="noopener" data-ru="Баги">Issues</a>
+      <a href="https://new.donatepay.ru/@lenya" target="_blank" rel="noopener" data-ru="Донат">Donate</a>
     </div>
-    <div class="footer-meta">
+    <div class="footer-meta" data-ru='MIT License · Сделано <a href="https://github.com/Leonid1095" target="_blank" rel="noopener">PLGames</a>'>
       MIT License · Made by <a href="https://github.com/Leonid1095" target="_blank" rel="noopener">PLGames</a>
     </div>
   </div>
 </footer>
+
+<script>
+(function() {
+  'use strict';
+
+  var STORAGE_KEY = 'svoboda-lang';
+  var SUPPORTED = ['en', 'ru'];
+
+  function detectLang() {
+    var saved = null;
+    try { saved = localStorage.getItem(STORAGE_KEY); } catch (e) {}
+    if (saved && SUPPORTED.indexOf(saved) !== -1) return saved;
+    var browser = (navigator.language || navigator.userLanguage || 'en').toLowerCase();
+    return browser.indexOf('ru') === 0 ? 'ru' : 'en';
+  }
+
+  function applyLang(lang) {
+    document.documentElement.setAttribute('lang', lang);
+    var nodes = document.querySelectorAll('[data-ru]');
+    for (var i = 0; i < nodes.length; i++) {
+      var node = nodes[i];
+      if (lang === 'ru') {
+        if (!node.hasAttribute('data-en')) {
+          node.setAttribute('data-en', node.innerHTML);
+        }
+        node.innerHTML = node.getAttribute('data-ru');
+      } else {
+        if (node.hasAttribute('data-en')) {
+          node.innerHTML = node.getAttribute('data-en');
+        }
+      }
+    }
+    var toggle = document.getElementById('langToggle');
+    if (toggle) {
+      var cur = toggle.querySelector('.lang-current');
+      var oth = toggle.querySelector('.lang-other');
+      if (lang === 'ru') {
+        cur.textContent = 'RU';
+        oth.textContent = 'EN';
+      } else {
+        cur.textContent = 'EN';
+        oth.textContent = 'RU';
+      }
+    }
+    try { localStorage.setItem(STORAGE_KEY, lang); } catch (e) {}
+  }
+
+  document.addEventListener('DOMContentLoaded', function() {
+    var lang = detectLang();
+    applyLang(lang);
+
+    var toggle = document.getElementById('langToggle');
+    if (toggle) {
+      toggle.addEventListener('click', function() {
+        var current = document.documentElement.getAttribute('lang') || 'en';
+        applyLang(current === 'en' ? 'ru' : 'en');
+      });
+    }
+  });
+})();
+</script>
 
 </body>
 </html>
