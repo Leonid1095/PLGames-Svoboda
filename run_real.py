@@ -40,6 +40,24 @@ sys.path.insert(0, str(BASE_DIR))
 # ─── Safety: kill ALL winws2 on exit ─────────────────────────────────────────
 
 def _emergency_cleanup():
+    """Restore the network on ANY exit (atexit + console handler).
+
+    Delegates to brain.net_cleanup.cleanup_network() — the one implementation
+    shared with the GUI Stop button — and falls back to the inline legacy
+    steps if that module cannot even be imported.
+    """
+    try:
+        from brain.net_cleanup import cleanup_network
+    except Exception:
+        _legacy_emergency_cleanup()
+        return
+    try:
+        cleanup_network(notify_gui=True)
+    except Exception:
+        _legacy_emergency_cleanup()
+
+
+def _legacy_emergency_cleanup():
     """Kill ALL child processes and restore network on exit.
 
     Prevents: WinDivert driver staying loaded (breaks internet),
@@ -118,6 +136,13 @@ def _emergency_cleanup():
     except Exception:
         pass
 
+    # 4. Tell the GUI the engine is down (best-effort)
+    try:
+        from brain.status_writer import write_status, STATE_STOPPED
+        write_status(state=STATE_STOPPED, strategy="", pid=0)
+    except Exception:
+        pass
+
 atexit.register(_emergency_cleanup)
 
 # Windows: catch console close (X button), Ctrl+C, logoff, shutdown
@@ -137,6 +162,8 @@ if platform.system() == "Windows":
         pass
 
 from brain.analytics import Analytics
+from brain.netenv import scrub_proxy_env, CURL_DIRECT
+from brain.zapret_paths import newest_first
 from brain.ai_advisor import AIAdvisor
 from brain.donate import DonateManager
 from brain.genetic import GAConfig, StrategyGene
@@ -153,7 +180,81 @@ logger = logging.getLogger("svoboda")
 _running = True
 _active_process: Optional[subprocess.Popen] = None
 _tspu_recommended_ttl: int = 0  # set by TSPU profiler, used by permanent winws2
+_tspu_is_active: bool = False  # True when a Russian TSPU is detected → enforce no-fake policy
 _zapret_lock = threading.Lock()  # mutex for winws2 stop/start to prevent WinDivert conflicts
+# Set while winws2 is deliberately stopped for maintenance (shadow testing,
+# enumeration, per-host solving). The health monitor must not read that as a
+# crash and respawn a permanent instance on top of the shadow tester, which
+# would put two WinDivert instances on the wire.
+_zapret_maintenance = threading.Event()
+
+
+# Fake-packet desync functions. TSPU detects and blocks ALL fake packets
+# (confirmed April 2026), so these are excluded from enumeration once a TSPU
+# is fingerprinted. Matched against the function token (before the first ':').
+# hostfakesplit interleaves fake host segments (needs fooling) - a fake too.
+_FAKE_FUNCS = frozenset({"fake", "fakedsplit", "fakeddisorder", "hostfakesplit"})
+
+
+def _tspu_excluded(base) -> set:
+    """Augment an excluded-functions set with fake-packet funcs under TSPU.
+
+    No-op for non-TSPU / unknown DPI, where fake packets may still work.
+    """
+    out = set(base) if base else set()
+    if _tspu_is_active:
+        out |= set(_FAKE_FUNCS)
+    return out
+
+
+_SINGLE_INSTANCE_MUTEX = "Global\\PLGamesSvobodaEngine"
+_instance_mutex = None       # keep a reference so the handle outlives startup
+
+
+def _acquire_single_instance() -> bool:
+    """Ensure only ONE engine runs at a time. True if we own the slot.
+
+    Two engines mean two winws2 instances fighting over WinDivert, each with a
+    blanket ``taskkill /F /IM winws2.exe`` and a health monitor that respawns on
+    "crash" — a flapping loop that breaks the user's internet. The GUI has its
+    own QSharedMemory guard, but that only covers the GUI: if it is killed or
+    logs off, its engine child is orphaned and the next launch would happily
+    start a second one. The guard therefore belongs here, in the engine.
+
+    Non-Windows and any failure to create the mutex return True: never block a
+    legitimate start because the guard itself did not work.
+    """
+    global _instance_mutex
+    if platform.system() != "Windows":
+        return True
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.CreateMutexW.argtypes = [wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR]
+        kernel32.CreateMutexW.restype = wintypes.HANDLE
+        handle = kernel32.CreateMutexW(None, True, _SINGLE_INSTANCE_MUTEX)
+        last_error = ctypes.get_last_error() if hasattr(ctypes, "get_last_error") else 0
+        if not handle:
+            return True
+        _instance_mutex = handle
+        ERROR_ALREADY_EXISTS = 183
+        if kernel32.GetLastError() == ERROR_ALREADY_EXISTS or last_error == ERROR_ALREADY_EXISTS:
+            return False
+        return True
+    except Exception as exc:
+        logger.debug("Single-instance guard unavailable: %s", exc)
+        return True
+
+
+def _pause_exit(msg: str = "\n  Press Enter to exit...") -> None:
+    """input() that tolerates a closed/absent stdin (GUI child, service)."""
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return
+        input(msg)
+    except (EOFError, OSError, RuntimeError):
+        pass
 
 
 def _signal_handler(signum, frame):
@@ -175,7 +276,7 @@ def _find_zapret_binary(base_dir: Path) -> Optional[Path]:
 
     # Search in zapret2 directories
     pattern = "zapret2*/binaries/windows-x86_64" if is_win else "zapret2*/binaries/linux-*"
-    for zdir in sorted(base_dir.glob(pattern), reverse=True):
+    for zdir in newest_first(base_dir.glob(pattern)):
         p = zdir / name
         if p.exists():
             return p
@@ -191,17 +292,16 @@ def _find_zapret_binary(base_dir: Path) -> Optional[Path]:
 
 def _find_lua_dir(base_dir: Path) -> Optional[Path]:
     """Find zapret2 Lua libraries."""
-    for zdir in sorted(base_dir.glob("zapret2*/lua"), reverse=True):
+    for zdir in newest_first(base_dir.glob("zapret2*/lua")):
         if (zdir / "zapret-lib.lua").exists():
             return zdir
     return None
 
 
 def _download_hostlist(base_dir: Path) -> Optional[Path]:
-    """Download blocked domains list from antizapret/refilter.
+    """Ensure hostlist.txt exists: existing file > hostlist-curated.txt > download.
 
-    Returns path to hostlist file, or None if download failed.
-    Uses cached list if less than 24h old.
+    Returns path to the hostlist file, or None if nothing could be obtained.
     """
     hostlist_path = base_dir / "hostlist.txt"
     auto_path = base_dir / "hostlist-auto.txt"
@@ -210,15 +310,32 @@ def _download_hostlist(base_dir: Path) -> Optional[Path]:
     if not auto_path.exists():
         auto_path.write_text("", encoding="utf-8")
 
-    # Use cached if fresh (< 24h)
+    # Curated list is the source of truth. The 81k Re-filter list broke AV/Steam/
+    # anti-cheat (2026-05), and hostlist.txt is gitignored, so seed it from the
+    # tracked hostlist-curated.txt and NEVER overwrite a user-edited list with a
+    # download. Big blocklists are a last resort when neither file exists.
+    curated = base_dir / "hostlist-curated.txt"
     if hostlist_path.exists():
-        age_hours = (time.time() - hostlist_path.stat().st_mtime) / 3600
-        if age_hours < 24:
-            lines = hostlist_path.read_text(encoding="utf-8", errors="replace").strip().split("\n")
-            print(f"  [OK] Hostlist cached: {len(lines)} domains")
+        try:
+            lines = [l for l in hostlist_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if l.strip() and not l.lstrip().startswith("#")]
+            print(f"  [OK] Hostlist: {len(lines)} domains (hostlist.txt)")
+            if curated.exists() and curated.stat().st_mtime > hostlist_path.stat().st_mtime + 60:
+                print("  [i] hostlist-curated.txt is newer - delete hostlist.txt to pick it up")
+        except Exception:
+            pass
+        return hostlist_path
+    if curated.exists():
+        try:
+            shutil.copy2(str(curated), str(hostlist_path))
+            lines = [l for l in curated.read_text(encoding="utf-8", errors="replace").splitlines()
+                     if l.strip() and not l.lstrip().startswith("#")]
+            print(f"  [OK] Hostlist seeded from hostlist-curated.txt: {len(lines)} domains")
             return hostlist_path
+        except Exception as exc:
+            print(f"  [!] Could not copy curated hostlist: {exc}")
 
-    # Try refilter first (faster, GitHub CDN)
+    # Last resort: public blocklists (huge; only when we have nothing at all)
     urls = [
         ("Re-filter", "https://github.com/1andrevich/Re-filter-lists/releases/latest/download/domains_all.lst"),
         ("Antizapret", "https://antizapret.prostovpn.org:8443/domains-export.txt"),
@@ -318,7 +435,7 @@ def _start_permanent_zapret(
         else:
             cmd.extend([
                 "--wf-tcp-out=80,443,2053,2083,2087,2096,8443",  # +Discord media ports
-                "--wf-udp-out=443,50000-50100",  # +Discord voice/video ports
+                "--wf-udp-out=443,19294-19344,50000-50100",  # +Discord voice/video (zapret2 1.0.3 range)
             ])
     else:
         cmd.extend(["--qnum=200"])
@@ -348,6 +465,22 @@ def _start_permanent_zapret(
                 except Exception:
                     pass
 
+    # Discord voice/STUN over UDP (opt-in). UDP cannot be split, so a fake with
+    # a Discord IP-discovery blob is the only known desync (Flowseal 1.10.2, x6).
+    # It IS a fake packet -> OFF by default under the TSPU no-fake policy.
+    _discord_udp_flags: list[str] = []
+    if is_win and not _streamer_mode and config and config.get("discord_udp_fake"):
+        _discord_udp_flags = ["fake:blob=discord_ipd:repeats=6"]
+
+    # Named blobs referenced by the strategy (seqovl_pattern=tls_google, blob=...)
+    if lua_dir:
+        try:
+            from brain.zapret_blobs import blob_args
+            _all_calls = list(flags) + list(extra_profiles or []) + _discord_udp_flags
+            cmd.extend(blob_args(_all_calls, BASE_DIR, lua_dir.parent, str(binary.parent)))
+        except Exception as exc:
+            logger.debug("blob args skipped: %s", exc)
+
     # Traffic morphing: apply browser TLS profile.
     # morpher_profile arg (warm-pool failover, network change, etc.) takes
     # precedence over the static config default, enabling JA3/JA4 rotation
@@ -367,7 +500,15 @@ def _start_permanent_zapret(
     # if tls_init:
     #     cmd.append(f"--lua-init={tls_init}")
 
-    # Hostlist: copy to binary dir to avoid path issues
+    # Hostlist: copy to binary dir to avoid path issues.
+    # These are PER-PROFILE filters, not global options: zapret2 checks profile
+    # filters "sequentially, first match wins" and a profile only sees its OWN
+    # lists (manual: "Filtering by lists"). So they are collected here and
+    # emitted into EVERY traffic profile below. Previously they were appended
+    # once, before the first profile, which left the HTTP profile with no
+    # hostlist at all — it desynced every port-80 flow, including the domains
+    # in list-exclude.txt.
+    hostlist_args: list[str] = []
     if hostlist and hostlist.exists():
         import shutil
         bin_dir = binary.parent
@@ -377,23 +518,23 @@ def _start_permanent_zapret(
             shutil.copy2(str(hostlist), str(local_hostlist))
             if not local_auto.exists():
                 local_auto.write_text("", encoding="utf-8")
-            cmd.append("--hostlist=hostlist.txt")
-            cmd.append("--hostlist-auto=hostlist-auto.txt")
+            hostlist_args.append("--hostlist=hostlist.txt")
+            hostlist_args.append("--hostlist-auto=hostlist-auto.txt")
             if _streamer_mode:
                 # Streamer: high threshold prevents streaming CDNs from being
                 # accidentally added to auto-hostlist during normal packet loss
-                cmd.append("--hostlist-auto-fail-threshold=20")
-                cmd.append("--hostlist-auto-fail-time=120")
+                hostlist_args.append("--hostlist-auto-fail-threshold=20")
+                hostlist_args.append("--hostlist-auto-fail-time=120")
             else:
-                cmd.append("--hostlist-auto-fail-threshold=8")
-                cmd.append("--hostlist-auto-fail-time=60")
+                hostlist_args.append("--hostlist-auto-fail-threshold=8")
+                hostlist_args.append("--hostlist-auto-fail-time=60")
             # Exclude Russian services (don't break yandex, vk, mail, etc.)
             exclude_src = Path(config.get("_base_dir", ".")) / "list-exclude.txt" if config else None
             if exclude_src and exclude_src.exists():
                 local_exclude = bin_dir / "list-exclude.txt"
                 try:
                     shutil.copy2(str(exclude_src), str(local_exclude))
-                    cmd.append("--hostlist-exclude=list-exclude.txt")
+                    hostlist_args.append("--hostlist-exclude=list-exclude.txt")
                 except Exception:
                     pass
         except Exception as exc:
@@ -410,19 +551,40 @@ def _start_permanent_zapret(
     # Multi-profile approach caused winws2 crashes. Simple = works.
     # ══════════════════════════════════════════════════════════════
 
-    # Per-host overrides FIRST (if any) — first match wins in zapret2
-    if extra_profiles:
-        cmd.extend(extra_profiles)
+    # Per-host overrides FIRST — zapret2 picks the FIRST profile whose filter
+    # matches, so the narrow --hostlist-domains profiles must precede the
+    # general one. build_extra_profiles() prefixes each with "--new"; the very
+    # first profile must NOT be preceded by one, or profile 0 (everything
+    # before the first --new) would swallow the global hostlist options.
+    _have_extra = bool(extra_profiles)
+    if _have_extra:
+        _extra = list(extra_profiles)
+        if _extra and _extra[0] == "--new":
+            _extra = _extra[1:]
+        cmd.extend(_extra)
 
-    # PROFILE 1: All TLS (port 443) — found strategy via hostlist
+    # PROFILE: All TLS (port 443) — found strategy over the general hostlist.
+    # The "--new" here is what previously went missing: without it this profile
+    # fused into the last per-host profile, so it inherited that profile's
+    # --hostlist-domains and the general hostlist got NO TLS desync at all.
+    if _have_extra:
+        cmd.append("--new")
     cmd.extend(["--filter-tcp=443", "--filter-l7=tls"])
+    cmd.extend(hostlist_args)
     for call in flags:
         cmd.append(f"--lua-desync={call}")
 
-    # PROFILE 2: HTTP (port 80)
+    # PROFILE: HTTP (port 80) — same strategy, same lists.
     cmd.extend(["--new", "--filter-tcp=80", "--filter-l7=http"])
+    cmd.extend(hostlist_args)
     for call in flags:
         cmd.append(f"--lua-desync={call}")
+
+    # PROFILE 3 (opt-in, config "discord_udp_fake"): Discord voice/STUN over UDP
+    if _discord_udp_flags:
+        cmd.extend(["--new", "--filter-udp=19294-19344,50000-50100", "--filter-l7=discord,stun"])
+        for call in _discord_udp_flags:
+            cmd.append(f"--lua-desync={call}")
 
     # QUIC: block via firewall instead of desync.
     # TSPU detects and blocks all fake packets, so QUIC desync fails.
@@ -505,8 +667,15 @@ def _start_permanent_zapret(
                 log.error("Permanent winws2 crashed: %s", stderr[:500])
                 return None
             log.info("Permanent winws2 started (pid=%d)", proc.pid)
+            _zapret_maintenance.clear()   # a permanent instance is live again
             # Flush DNS cache so browser picks up real IPs instead of cached blocked
             _flush_dns_cache()
+            # Publish state for the GUI (best-effort, never breaks the engine)
+            try:
+                from brain.status_writer import write_status, STATE_ACTIVE
+                write_status(state=STATE_ACTIVE, strategy=" | ".join(flags), pid=proc.pid)
+            except Exception:
+                pass
             return proc
         except Exception as exc:
             print(f"  [ERROR] Failed to start winws2: {exc}")
@@ -572,7 +741,10 @@ def _stop_permanent_zapret(proc: Optional[subprocess.Popen]) -> None:
     """Stop permanent winws2/nfqws2 instance + force kill ALL winws2.
 
     Thread-safe: uses _zapret_lock to prevent concurrent stop/start.
+    Marks maintenance so the health monitor does not respawn behind our back
+    while the caller does its work; _start_permanent_zapret clears it again.
     """
+    _zapret_maintenance.set()
     with _zapret_lock:
         if proc is not None:
             try:
@@ -620,7 +792,7 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
     _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
     try:
         cmd = [
-            "curl", "-s", "--ssl-no-revoke",
+            "curl", "-s", *CURL_DIRECT, "--ssl-no-revoke",
             "--max-time", str(timeout),
             f"https://{host}",
             "-o", "NUL" if is_win else "/dev/null",
@@ -725,12 +897,58 @@ def _curl_check_one(host: str, timeout: int = 5, follow_redirects: bool = True) 
 
 
 def main():
-    global _running, _active_process, _tspu_recommended_ttl
+    global _running, _active_process, _tspu_recommended_ttl, _tspu_is_active
 
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    # One engine at a time. Checked before ANY network state is touched, so a
+    # refused second instance changes nothing about the running one.
+    if not _acquire_single_instance():
+        print("\n  [!] PLGames Svoboda engine is already running.")
+        print("      Two engines fight over the WinDivert driver and break the")
+        print("      internet. Stop the running one first.")
+        logger.warning("Refusing to start: another engine already holds the instance mutex")
+        _pause_exit()
+        return
+
+    # GUI -> engine graceful stop: runtime/stop.request (see brain/status_writer).
+    # Lets the GUI avoid TerminateProcess, so our atexit cleanup runs normally.
+    try:
+        from brain.status_writer import stop_requested, clear_stop_request
+        clear_stop_request()  # a stale request from a previous run must not kill us
+
+        def _stop_watch():
+            global _running
+            while _running:
+                if stop_requested():
+                    clear_stop_request()
+                    logger.info("Stop requested by GUI - shutting down")
+                    print("\n  Stop requested - shutting down...")
+                    _running = False
+                    break
+                time.sleep(0.5)
+
+        threading.Thread(target=_stop_watch, name="stop-watch", daemon=True).start()
+    except Exception as exc:
+        # Not fatal: without the watcher the GUI just falls back to terminating
+        # the process and running the cleanup itself.
+        logger.warning("GUI stop watcher unavailable: %s", exc)
+
     _print_header()
+
+    # Direct-path measurements only: drop HTTP(S)_PROXY so curl/requests
+    # test the real ISP path (see brain/netenv.py for the live incident).
+    _scrubbed_proxies = scrub_proxy_env()
+    if _scrubbed_proxies:
+        print(f"  [!] Ignoring proxy env for measurements: {', '.join(sorted(_scrubbed_proxies))}")
+
+    # Publish "starting" for the GUI (best-effort)
+    try:
+        from brain.status_writer import write_status, STATE_STARTING
+        write_status(state=STATE_STARTING, strategy="", isp="", sites="")
+    except Exception:
+        pass
 
     # ─── Load config ──────────────────────────────────────────────────
     config = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
@@ -773,7 +991,7 @@ def main():
         ui.error("winws2.exe not found!")
         ui.detail("Download zapret2 from: https://github.com/bol-van/zapret2")
         ui.detail("Extract to this directory.")
-        input("\n  Press Enter to exit...")
+        _pause_exit("\n  Press Enter to exit...")
         return
 
     ui.ok(f"zapret2: {zapret_bin}")
@@ -813,12 +1031,14 @@ def main():
     profiler = ISPProfiler(config)
     isp_name = "unknown"
     asn = "?"
+    _isp_country = ""
     try:
         profile = profiler.detect()
         if profile:
             isp_name = profile.isp_name or "unknown"
             asn = profile.asn or "?"
-            ui.ok(f"ISP: {isp_name} ({asn})")
+            _isp_country = getattr(profile, "country", "") or ""
+            ui.ok(f"ISP: {isp_name} ({asn}) {_isp_country}".rstrip())
         else:
             ui.warn("ISP detection failed (using generic strategies)")
     except Exception as exc:
@@ -829,14 +1049,31 @@ def main():
             if profiler.profile:
                 isp_name = profiler.profile.isp_name or "unknown"
                 asn = profiler.profile.asn or "?"
+                _isp_country = getattr(profiler.profile, "country", "") or ""
                 ui.ok(f"ISP: {isp_name} ({asn}) (cached)")
             else:
                 ui.warn("ISP unknown (will detect after bypass)")
         except Exception:
             ui.warn("ISP unknown (will detect after bypass)")
 
+    try:
+        from brain.status_writer import write_status, STATE_SEARCHING
+        write_status(state=STATE_SEARCHING, isp=f"{isp_name} ({asn})")
+    except Exception:
+        pass
+
     # ─── Smart DNS diagnosis ─────────────────────────────────────────
     from brain.dns_fixer import detect_sni_proxy, remove_hosts_entries
+    # Clear any block left by a previous run BEFORE doing anything else. atexit
+    # does not run on power loss, a BSOD, or TerminateProcess of the engine, and
+    # a stale "142.x.x.x youtube.com" line survives reboot and uninstall — it
+    # would silently break YouTube long after Svoboda is gone, and would also
+    # poison this run's own DNS diagnosis.
+    try:
+        if remove_hosts_entries():
+            ui.warn("Removed a stale DNS block left by a previous run")
+    except Exception as exc:
+        logger.debug("Startup hosts cleanup failed: %s", exc)
     atexit.register(remove_hosts_entries)  # Clean hosts file on ANY exit
 
     _sni_proxy_ip = detect_sni_proxy(["youtube.com", "discord.com", "x.com"])
@@ -927,7 +1164,11 @@ def main():
     try:
         ui.step("Profiling DPI/TSPU...")
         tspu = TSPUProfiler(timeout=5)
-        tspu_profile = tspu.profile("youtube.com", isp=isp_name, asn=asn if 'asn' in dir() else "")
+        tspu_profile = tspu.profile(
+            "youtube.com", isp=isp_name, asn=asn if 'asn' in dir() else "",
+            country=_isp_country, bypass_active=(_active_process is not None),
+        )
+        _tspu_is_active = str(getattr(tspu_profile, "dpi_type", "")).startswith("tspu")
         if tspu_profile.dpi_hop_distance:
             _tspu_recommended_ttl = tspu_profile.recommended_ttl or 0
             ui.tspu_info(
@@ -949,6 +1190,29 @@ def main():
             ui.warn("DoH unavailable (ECH disabled)")
     except Exception as exc:
         logger.debug("ECH setup error: %s", exc)
+
+    # ─── DNS poisoning fix (ISP stub / dead SNI proxy) ───────────────
+    # Desync cannot help when the resolver hands out a bogus IP: on er-telecom
+    # discord.com resolved to a foreign SNI proxy that does not serve Discord
+    # (curl exit=60 on EVERY strategy, 2026-05-03). Only answers proven bogus
+    # (cert mismatch / shared stub IP) are overridden; see brain/dns_fixer.py.
+    try:
+        from brain.dns_fixer import diagnose_and_fix_dns
+        _dns_hosts = [h for h in config.get("test_hosts", []) if h and "speedtest" not in h]
+        if _dns_hosts:
+            _dns_res = diagnose_and_fix_dns(
+                _dns_hosts,
+                doh_resolver=(ech._doh if _ech_ready else None),
+                sni_proxy_ip=_sni_proxy_ip,
+            )
+            _dns_fixed = [h for h, r in _dns_res.items() if r.get("fixed")]
+            _dns_unres = [h for h, r in _dns_res.items() if r.get("status") == "poisoned_unresolved"]
+            if _dns_fixed:
+                ui.ok(f"DNS fixed via hosts file: {', '.join(_dns_fixed)}")
+            if _dns_unres:
+                ui.warn(f"DNS looks poisoned but unfixable: {', '.join(_dns_unres)}")
+    except Exception as exc:
+        logger.debug("DNS diagnosis error: %s", exc)
 
     # ─── Smart block detection ──────────────────────────────────────
     # Ensure basic desync is running during classification — without it,
@@ -980,6 +1244,13 @@ def main():
 
     if all_accessible:
         ui.ok("All sites accessible without DPI bypass.")
+        # Release the classification instance. Nothing is blocked, so no desync
+        # is warranted — and _monitoring_loop only activates recovery while
+        # _active_process is None, so holding it here would freeze the engine on
+        # an arbitrary, never-validated strategy if blocking appeared later.
+        if _active_process is not None:
+            _stop_permanent_zapret(_active_process)
+            _active_process = None
         print("  Starting monitoring mode (will activate if blocking detected)...")
         _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                          ai, sync, tier, profiler, isp_name, hostlist,
@@ -1045,6 +1316,14 @@ def main():
     dpi_blocked = {h: r for h, r in blocked.items() if h in routing_plan.zapret2_hosts}
     if not dpi_blocked and not routing_plan.zapret2_hosts:
         # All blocked sites are IP-blocked, no DPI bypass needed
+        # Every path out of here must release winws2 first: these sites are
+        # IP-blocked, so desync cannot help them, and leaving the instance (plus
+        # the QUIC firewall rule and CertificateRevocation=0) applied while we
+        # idle — or while _pause_exit waits on a console — is what
+        # run-real-safety.md forbids.
+        if _active_process is not None:
+            _stop_permanent_zapret(_active_process)
+            _active_process = None
         if _proxy_ready:
             ui.ok("All blocked sites routed through proxy.")
             print(f"\n  Monitoring... (Ctrl+C to stop)\n")
@@ -1058,7 +1337,7 @@ def main():
             print("  Install Cloudflare WARP (free): https://1.1.1.1/")
             print("  Or add to config.json: \"user_proxy\": \"socks5://your-vps:port\"")
             analytics.close()
-            input("  Press Enter to exit...")
+            _pause_exit("  Press Enter to exit...")
             return
 
     # ─── ECH check for DPI-blocked hosts ──────────────────────────
@@ -1179,18 +1458,32 @@ def main():
         def _winws2_health_monitor():
             global _active_process
             backoff = 2
+            dead_reads = 0
             while _running:
                 # Short sleep loop so shutdown is responsive
                 for _ in range(10):
                     if not _running:
                         return
                     time.sleep(1)
+                if _zapret_maintenance.is_set():
+                    # Deliberately stopped (shadow test / enum / solver in
+                    # progress). Not a crash — leave it alone.
+                    dead_reads = 0
+                    continue
                 proc = _active_process
                 if proc is None:
+                    dead_reads = 0
                     continue
                 if proc.poll() is None:
                     backoff = 2  # healthy → reset
+                    dead_reads = 0
                     continue
+                # Require two consecutive dead observations: _active_process
+                # still points at the old handle for the ~1-4s a stop takes.
+                dead_reads += 1
+                if dead_reads < 2:
+                    continue
+                dead_reads = 0
                 # Process has died
                 rc = proc.returncode
                 logger.critical("winws2 crashed (pid=%s rc=%s) — respawning",
@@ -1267,7 +1560,11 @@ def main():
                             print(f"  [!] New ISP: {new_isp} (was {isp_name})")
                         from brain.tspu_profiler import TSPUProfiler as _TSPU_WD
                         _wd_tspu = _TSPU_WD(timeout=5)
-                        _new_prof = _wd_tspu.profile(hosts[0], isp=new_isp or isp_name)
+                        _new_prof = _wd_tspu.profile(
+                            hosts[0], isp=new_isp or isp_name,
+                            country=(getattr(profiler.profile, "country", "") or "") if profiler.profile else "",
+                            bypass_active=(_active_process is not None),
+                        )
                         if _new_prof.recommended_ttl:
                             _tspu_recommended_ttl = _new_prof.recommended_ttl
                             logger.info("Updated TSPU TTL: %d", _tspu_recommended_ttl)
@@ -1474,7 +1771,11 @@ def main():
                             ui.warn(f"No fix for {fh}")
                 finally:
                     # Always restart permanent zapret (with or without per-host profiles)
-                    _wd_extra = solver.build_extra_profiles(lua_dir) if solved else None
+                    # Keep the previously loaded overrides when this solve round
+                    # found nothing: setting them to None silently removed every
+                    # already-working per-host profile from all later restarts.
+                    _wd_extra = (solver.build_extra_profiles(lua_dir) if solved
+                                 else _wd_extra)
                     _active_process = _start_permanent_zapret(
                         zapret_bin, lua_dir, _wd_flags, hostlist,
                         _tspu_recommended_ttl, config, extra_profiles=_wd_extra,
@@ -1581,7 +1882,7 @@ def main():
                 if not found_fix:
                     ui.step("Step 4: Fast enumeration...")
                     excluded = ai_feedback.get_excluded_functions()
-                    en = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
+                    en = StrategyEnumerator(excluded_functions=_tspu_excluded(excluded), include_harvested=True)
                     _wd_thr = 0.40 if (tspu_profile and "tspu" in getattr(tspu_profile, 'dpi_type', '').lower()) else 0.55
                     er = en.enumerate(
                         tester, threshold=_wd_thr,
@@ -1702,7 +2003,7 @@ def main():
                 if kwargs.get("exclude_fake"):
                     forbid_genes = (forbid_genes or []) + ["fake"]
                 excluded = set(forbid_genes or []) | ai_feedback.get_excluded_functions()
-                enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
+                enum = StrategyEnumerator(excluded_functions=_tspu_excluded(excluded), include_harvested=True)
                 best_fit, best_flags, best_name = 0.0, [], ""
                 tried_history: list[tuple[str, float]] = []
                 # Stop permanent so shadow tester can use WinDivert
@@ -1870,7 +2171,7 @@ def main():
                 tspu_profile=tspu_dict,
                 block_analysis=block_analysis_dict,
                 test_history=[r.to_dict() for r in ai_feedback.history[-10:]],
-                excluded_functions=list(ai_feedback.get_excluded_functions()),
+                excluded_functions=list(_tspu_excluded(ai_feedback.get_excluded_functions())),
                 warm_pool=_warm_pool_snapshot,
                 # AI engine runs BEFORE _unified_watchdog defines _wd_morpher_profile,
                 # so we can't reference the watchdog-scope variable here. Use the
@@ -1947,7 +2248,7 @@ def main():
                     # Throttled — try enum for faster strategy before applying
                     from brain.enumerator import StrategyEnumerator
                     excluded = ai_feedback.get_excluded_functions()
-                    enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
+                    enum = StrategyEnumerator(excluded_functions=_tspu_excluded(excluded), include_harvested=True)
                     better = enum.enumerate(tester, threshold=verified + 0.05,
                         on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                     if better and better["fitness"] > verified:
@@ -2065,6 +2366,11 @@ def main():
                 verify = _quick_connectivity_check(hosts)
                 working = sum(1 for ok in verify.values() if ok)
                 total = len(verify)
+                try:
+                    from brain.status_writer import write_status
+                    write_status(sites=f"{working}/{total}", fitness=round(best_fitness, 3))
+                except Exception:
+                    pass
                 print()
                 for host, ok in verify.items():
                     print(f"    {host}: {'OK' if ok else 'FAIL'}")
@@ -2111,7 +2417,7 @@ def main():
         ui.info(f"TSPU detected → acceptance threshold {enum_threshold}")
 
     print(f"\n  Fast strategy enumeration ({len(priority_strategies)} strategies, AI-prioritized)...")
-    enumerator = StrategyEnumerator(strategies=priority_strategies, excluded_functions=excluded)
+    enumerator = StrategyEnumerator(strategies=priority_strategies, excluded_functions=_tspu_excluded(excluded))
 
     def _enum_progress(i, total, name, fitness):
         ui.enum_line(i, total, name, fitness, threshold=enum_threshold)
@@ -2245,7 +2551,7 @@ def main():
         print("  This may mean DPI is too aggressive or network issues.")
         print("  Try running again or check your connection.")
         analytics.close()
-        input("  Press Enter to exit...")
+        _pause_exit("  Press Enter to exit...")
         return
 
     # Thorough verification of winner (full trials + timeout)
@@ -2255,7 +2561,7 @@ def main():
         print(f"  [!] Strategy failed verification (fitness={verified_fitness:.3f})")
         print("  Try running again.")
         analytics.close()
-        input("  Press Enter to exit...")
+        _pause_exit("  Press Enter to exit...")
         return
     best.fitness = verified_fitness
     print(f"  [OK] Verified: fitness={verified_fitness:.3f}")
@@ -2285,7 +2591,7 @@ def main():
     if _active_process is None:
         print("  [ERROR] Failed to start DPI bypass!")
         analytics.close()
-        input("  Press Enter to exit...")
+        _pause_exit("  Press Enter to exit...")
         return
 
     # Verify it works
@@ -2293,6 +2599,11 @@ def main():
     verify = _quick_connectivity_check(hosts)
     working = sum(1 for ok in verify.values() if ok)
     total = len(verify)
+    try:
+        from brain.status_writer import write_status
+        write_status(sites=f"{working}/{total}", fitness=round(best.fitness, 3))
+    except Exception:
+        pass
 
     print()
     for host, ok in verify.items():
@@ -2416,7 +2727,7 @@ def _monitoring_loop(hosts, config, zapret_bin, lua_dir, analytics, manager,
                     print("  Running enumerator (anti-throttle first)...")
                     from brain.enumerator import StrategyEnumerator
                     excluded = ai_feedback.get_excluded_functions() if ai_feedback else set()
-                    enum = StrategyEnumerator(excluded_functions=excluded, include_harvested=True)
+                    enum = StrategyEnumerator(excluded_functions=_tspu_excluded(excluded), include_harvested=True)
                     result = enum.enumerate(tester, threshold=0.40,
                         on_progress=lambda i, t, n, f: print(f"    [{i}/{t}] {n}: {f:.3f}") if f > 0 else None)
                     if result:
@@ -2504,6 +2815,25 @@ def _get_seeds(isp_name: str, ai: AIAdvisor, ai_feedback=None, tspu_profile=None
         except Exception as exc:
             print(f"  [!] AI unavailable: {exc}")
 
+    # ── Drop fake-packet seeds on Russian TSPU ──────────────────────────────
+    # TSPU detects and blocks ALL fake packets (confirmed April 2026). Trying
+    # them on a TSPU ISP only wastes enumeration time and risks auto-fail
+    # blocklisting. Keep them only for non-TSPU / unknown DPI where fake may
+    # still work. Match on the desync FUNCTION name (before the first ':') so
+    # that no-fake strategies using a fake_* blob as a seqovl_pattern (e.g.
+    # multisplit:...:seqovl_pattern=fake_default_tls) are NOT dropped.
+    is_tspu = bool(tspu_profile and str(getattr(tspu_profile, "dpi_type", "")).startswith("tspu"))
+    if is_tspu:
+        def _is_fake_seed(seed):
+            return any(flag.split(":", 1)[0] in _FAKE_FUNCS for flag in seed)
+        before = len(seeds)
+        seeds = [s for s in seeds if not _is_fake_seed(s)]
+        dropped = before - len(seeds)
+        if dropped:
+            logger.info("TSPU detected (%s) — dropped %d fake-packet seed(s) [no-fake policy]",
+                        tspu_profile.dpi_type, dropped)
+            print(f"  TSPU detected — skipping {dropped} fake-packet strategies (blocked since April 2026)")
+
     return seeds
 
 
@@ -2519,7 +2849,7 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=No
     print()
 
     # Get excluded functions from AI feedback (if provided)
-    _excluded = ai_feedback.get_excluded_functions() if ai_feedback else []
+    _excluded = _tspu_excluded(ai_feedback.get_excluded_functions() if ai_feedback else [])
     ga = StrategyGene(ga_config, seed_strategies=seeds, excluded_functions=_excluded,
                       dpi_type=dpi_type, country="ru",
                       recommended_ttl=recommended_ttl)
@@ -2541,21 +2871,25 @@ def _run_evolution(tester, ga_config, seeds, analytics, isp_name, ai_feedback=No
             isp=isp_name,
         )
 
-        # Interim apply: if GA found a usable strategy (>0.3) and nothing is
-        # running yet, apply it immediately so user has partial bypass while
-        # GA continues searching for better. Prevents 15-min total blackout.
-        if (best.fitness > 0.3 and best.fitness > _interim_fitness[0] + 0.1
-                and not _interim_applied[0]):
-            _interim_applied[0] = True
+        # NO interim apply during evolution.
+        #
+        # This used to start a PERMANENT winws2 here, to give the user partial
+        # bypass during a long GA run. But on_gen fires BETWEEN generations,
+        # while ga.evolve() keeps calling tester.test_strategy() — which starts
+        # its own shadow winws2. The shadow tester only kills its previous
+        # instance by PID, so the interim permanent instance survived and the
+        # two ran concurrently for the rest of the evolution: exactly the
+        # "two WinDivert instances break the internet" condition in CLAUDE.md.
+        # It also corrupted the GA itself, since every later fitness score was
+        # then measured through the interim desync.
+        #
+        # One WinDivert, one instance: the winner is applied when evolution
+        # finishes. The enumerator already runs first and usually finds a
+        # strategy in seconds, so the GA is the fallback path, not the common one.
+        if best.fitness > _interim_fitness[0]:
             _interim_fitness[0] = best.fitness
-            logger.info("Interim apply: fitness=%.3f at gen %d", best.fitness, gen)
-            print(f"  [interim] Applying partial bypass (fitness={best.fitness:.3f})...")
-            _active_process = _start_permanent_zapret(
-                zapret_bin, lua_dir, best.flags, hostlist,
-                _tspu_recommended_ttl, config,
-            )
-            if _active_process:
-                _flush_dns_cache()
+            logger.debug("GA best so far: %.3f at gen %d (applied after evolution)",
+                         best.fitness, gen)
 
     ga.set_generation_callback(on_gen)
     best = ga.evolve(tester.test_strategy)
@@ -2578,4 +2912,4 @@ if __name__ == "__main__":
     finally:
         # Ensure cleanup even on unhandled exception
         _emergency_cleanup()
-    input("\n  Press Enter to exit...")
+    _pause_exit("\n  Press Enter to exit...")

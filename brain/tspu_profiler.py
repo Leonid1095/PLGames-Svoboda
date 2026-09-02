@@ -18,7 +18,21 @@ import re
 from dataclasses import dataclass, field
 from typing import Optional
 
+from brain.netenv import CURL_DIRECT
 logger = logging.getLogger("svoboda.tspu")
+
+# ISPs known to sit behind Roskomnadzor TSPU (every RU ISP is required to).
+RU_ISPS = frozenset({
+    "rostelecom", "mts", "megafon", "beeline", "tele2", "tattelecom",
+    "er-telecom", "ttk", "netbynet", "ufanet", "yota",
+})
+
+
+def is_russian_network(country: str = "", isp: str = "") -> bool:
+    """True if the network is Russian: ISO country RU or a known RU ISP name."""
+    if (country or "").strip().upper() == "RU":
+        return True
+    return (isp or "").strip().lower() in RU_ISPS
 
 
 @dataclass
@@ -40,6 +54,8 @@ class TSPUProfile:
     isp: str = "unknown"
     asn: str = ""
     autottl_preferred: bool = False          # True when distance is estimated, not measured
+    country: str = ""                        # ISO country of the ISP ("RU" => TSPU by law)
+    probe_inconclusive: bool = False         # probe ran behind an active bypass
 
     # Evidence
     evidence: list[str] = field(default_factory=list)
@@ -52,7 +68,8 @@ class TSPUProfiler:
         self.timeout = timeout
         self._is_windows = platform.system() == "Windows"
 
-    def profile(self, blocked_host: str = "youtube.com", isp: str = "unknown", asn: str = "") -> TSPUProfile:
+    def profile(self, blocked_host: str = "youtube.com", isp: str = "unknown", asn: str = "",
+                country: str = "", bypass_active: bool = False) -> TSPUProfile:
         """Full TSPU profiling for a blocked host.
 
         Steps:
@@ -61,15 +78,15 @@ class TSPUProfiler:
         3. Estimate DPI distance
         4. Recommend optimal fake TTL
         """
-        prof = TSPUProfile(isp=isp, asn=asn)
+        prof = TSPUProfile(isp=isp, asn=asn, country=(country or "").upper())
 
         # Step 1: Server distance via ping
         prof.server_hop_distance = self._measure_server_distance(blocked_host)
         if prof.server_hop_distance:
             prof.evidence.append(f"Server distance: ~{prof.server_hop_distance} hops")
 
-        # Step 2: DPI behavior probing
-        self._probe_dpi_behavior(blocked_host, prof)
+        # Step 2: DPI behavior probing (inconclusive if a bypass is already running)
+        self._probe_dpi_behavior(blocked_host, prof, bypass_active=bypass_active)
 
         # Step 3: Estimate DPI distance
         self._estimate_dpi_distance(prof)
@@ -133,14 +150,22 @@ class TSPUProfiler:
 
     # ─── DPI behavior probing ────────────────────────────────────────────
 
-    def _probe_dpi_behavior(self, host: str, prof: TSPUProfile) -> None:
+    def _probe_dpi_behavior(self, host: str, prof: TSPUProfile, bypass_active: bool = False) -> None:
         """Test what triggers DPI blocking."""
 
         # Test 1: Plain HTTPS (should be blocked)
         https_result = self._curl_probe(f"https://{host}")
         if https_result["success"]:
+            if bypass_active:
+                # winws2 is already desyncing this host: reachability says
+                # nothing about the DPI. Live run 2026-05-03 misclassified
+                # er-telecom as 'unknown' this way and silently disabled the
+                # no-fake policy.
+                prof.probe_inconclusive = True
+                prof.evidence.append("HTTPS reachable while bypass active - probe inconclusive")
+                return
             prof.blocks_tls_sni = False
-            prof.evidence.append("HTTPS not blocked (unexpected)")
+            prof.evidence.append("HTTPS not blocked (host reachable directly)")
             return
 
         prof.evidence.append(f"HTTPS blocked: exit={https_result['exit']}, {https_result['error']}")
@@ -175,7 +200,7 @@ class TSPUProfiler:
         try:
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", *CURL_DIRECT,
                     "--max-time", str(self.timeout),
                     url,
                     "-o", "NUL" if self._is_windows else "/dev/null",
@@ -256,7 +281,21 @@ class TSPUProfiler:
     # ─── DPI type classification ─────────────────────────────────────────
 
     def _classify_dpi_type(self, prof: TSPUProfile) -> None:
-        """Classify DPI type based on behavior."""
+        """Classify DPI type based on behavior.
+
+        Russian networks always get a tspu_* type: TSPU is mandatory at every
+        RU ISP, so an inconclusive or 'not blocked' probe must not switch off
+        the TSPU-specific policies (no fake packets, lower thresholds).
+        """
+        russian = is_russian_network(prof.country, prof.isp)
+        if prof.probe_inconclusive:
+            if russian:
+                prof.dpi_type = "tspu_stateful"
+                prof.evidence.append("DPI type: assumed stateful TSPU (Russian network, probe inconclusive)")
+            else:
+                prof.dpi_type = "unknown"
+                prof.evidence.append("DPI type: unknown (probe inconclusive)")
+            return
         if prof.blocks_tls_sni and not prof.blocks_http_host:
             if prof.is_stateful:
                 prof.dpi_type = "tspu_stateful"
@@ -267,6 +306,9 @@ class TSPUProfiler:
         elif prof.blocks_tls_sni and prof.blocks_http_host:
             prof.dpi_type = "tspu_full"
             prof.evidence.append("DPI type: full TSPU (blocks both SNI and Host)")
+        elif russian:
+            prof.dpi_type = "tspu_stateful"
+            prof.evidence.append("DPI type: assumed stateful TSPU (Russian network)")
         else:
             prof.dpi_type = "unknown"
             prof.evidence.append("DPI type: unknown")

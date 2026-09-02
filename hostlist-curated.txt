@@ -1,0 +1,129 @@
+# PLGames Svoboda — curated hostlist v3 (2026-09-01)
+# Tracked source of truth. Copied to hostlist.txt on first run; hostlist.txt is the
+# user-editable runtime copy (GUI "Domains" tab) and is NEVER overwritten by downloads.
+#
+# Only services CONFIRMED blocked/throttled at the TSPU level in RU.
+# Adding non-blocked services here BREAKS them (desync kills WebSocket chat,
+# anti-cheat, launchers). Geo/sanctions restrictions (PSN/Xbox/EA/Epic store payments,
+# Netflix, Spotify, Crunchyroll...) are NOT DPI — desync cannot fix them and only
+# risks breaking the service. Be conservative. If unsure — leave it OUT.
+# Exclusions in list-exclude.txt always win over entries here.
+
+# === Discord (blocked Sep 2024; list mirrors Flowseal 1.10.2 list-general) ===
+discord.com
+discord.gg
+discord.media
+discordapp.com
+discordapp.net
+discord-activities.com
+discordactivities.com
+discordcdn.com
+discord.app
+discord.co
+discord.dev
+discord.gift
+discord.gifts
+discord.new
+discord.store
+discord.status
+discordsays.com
+discordstatus.com
+discordmerch.com
+discordpartygames.com
+discordsez.com
+dis.gd
+stable.dl2.discordapp.net
+# NOTE: discord-attachments-uploads-prd.storage.googleapis.com is deliberately
+# NOT listed. list-exclude.txt excludes googleapis.com, and zapret2 matches
+# hostlists by domain suffix, so the excluded parent would shadow it anyway.
+# Dropping googleapis.com from the exclude list is not an option -- it carries
+# antivirus, Office and CDN traffic.
+
+# === YouTube (throttled since Aug 2024; mirrors Flowseal list-google) ===
+youtube.com
+youtu.be
+youtube-nocookie.com
+youtubekids.com
+googlevideo.com
+ytimg.com
+ggpht.com
+yt3.googleusercontent.com
+# NOTE: the *.l.google.com YouTube backends (wide-youtube, youtube-ui,
+# yt-video-upload, ytimg) are deliberately NOT listed. list-exclude.txt excludes
+# google.com and zapret2 matches by domain suffix, so an excluded parent shadows
+# them. The domains that actually carry YouTube playback -- googlevideo.com,
+# youtube.com, ytimg.com -- are listed above and are not shadowed.
+
+# === Encrypted DNS resolvers (SNI-blocked on Dom.ru/Rostelecom/MTS/Beeline since 2026-07-03) ===
+# Desyncing their TLS makes DoH work again (wiki.zapret.moe, Flowseal list-general).
+dns.google
+cloudflare-dns.com
+one.one.one.one
+mozilla.cloudflare-dns.com
+dns.quad9.net
+dns.adguard-dns.com
+dns.nextdns.io
+doh.opendns.com
+doh.cleanbrowsing.org
+freedns.controld.com
+wikimedia-dns.org
+cloudflare-ech.com
+encryptedsni.com
+
+# === Cloudflare services hit by the "16 KB freeze" on CF ranges (Flowseal list-general) ===
+cloudflarestream.com
+cloudflarestorage.com
+cloudflareinsights.com
+cloudflaressl.com
+cloudflarestatus.com
+cloudflareaccess.com
+
+# === Twitter / X (blocked since Mar 2022) ===
+twitter.com
+x.com
+twimg.com
+t.co
+twttr.com
+
+# === Instagram (blocked since Mar 2022) ===
+instagram.com
+cdninstagram.com
+ig.me
+
+# === Facebook / Meta (blocked since Mar 2022) ===
+facebook.com
+fb.com
+fbcdn.net
+fbsbx.com
+messenger.com
+
+# === LinkedIn (blocked since 2016) ===
+linkedin.com
+licdn.com
+
+# === Telegram (re-blocked 2025; mostly IP-level, desync helps only for web/CDN) ===
+t.me
+telegram.org
+telegram.me
+telegra.ph
+tdesktop.com
+tx.me
+
+# === Roblox (blocked by RKN Dec 2025) ===
+roblox.com
+rbxcdn.com
+robloxlabs.com
+
+# === Twitch extensions (Cloudflare-hosted; twitch.tv itself is EXCLUDED — desync breaks chat) ===
+frankerfacez.com
+ffzap.com
+betterttv.net
+7tv.app
+7tv.io
+
+# NOT INCLUDED — work without zapret in RU or are not DPI blocks:
+# - WhatsApp (calls restricted by RKN, not SNI-blocked — desync does not help)
+# - Reddit, BBC/DW/Meduza (work directly / via DoH)
+# - Twitch, Riot, Steam, Epic, Xbox, PSN, EA, Battle.net, Ubisoft — EXCLUDED (anti-cheat, launchers)
+# - Netflix, Hulu, Disney+, HBO, Spotify, Crunchyroll — geo/sanctions, not DPI
+# - Tor (its own bridge mechanism, don't desync)

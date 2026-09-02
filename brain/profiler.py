@@ -13,6 +13,8 @@ from typing import Optional
 
 import requests
 
+from brain.netenv import direct_session
+
 logger = logging.getLogger("svoboda.profiler")
 
 # ─── Known network middlebox signatures ────────────────────────────────────────
@@ -118,8 +120,10 @@ class ISPProfile:
         middlebox_ttl: Optional[int] = None,
         middlebox_window: Optional[int] = None,
         last_check: Optional[str] = None,
+        country: str = "",
     ):
         self.external_ip = external_ip
+        self.country = country  # ISO code from ipinfo ("RU" => TSPU present by law)
         self.asn = asn
         self.isp_name = isp_name
         self.org = org
@@ -141,6 +145,7 @@ class ISPProfile:
             "middlebox_ttl": self.middlebox_ttl,
             "middlebox_window": self.middlebox_window,
             "last_check": self.last_check,
+            "country": self.country,
         }
 
     @classmethod
@@ -193,6 +198,7 @@ class ISPProfiler:
             profile.asn = asn_info.get("asn", "")
             profile.org = asn_info.get("org", "")
             profile.region = asn_info.get("region", "")
+            profile.country = asn_info.get("country", "")
             profile.isp_name = self._resolve_isp_name(profile.asn, profile.org)
 
         # 3. Detect middlebox signature via RST analysis
@@ -228,7 +234,7 @@ class ISPProfiler:
         ]
         for api in apis:
             try:
-                resp = requests.get(api, timeout=5)
+                resp = direct_session().get(api, timeout=5)
                 if resp.status_code == 200:
                     if api.endswith("json"):
                         return resp.json().get("ip", "")
@@ -244,7 +250,7 @@ class ISPProfiler:
     def _get_asn_info(self, ip: str) -> dict:
         """Определить ASN и организацию через ipinfo.io."""
         try:
-            resp = requests.get(f"https://ipinfo.io/{ip}/json", timeout=5)
+            resp = direct_session().get(f"https://ipinfo.io/{ip}/json", timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 org = data.get("org", "")
@@ -254,6 +260,7 @@ class ISPProfiler:
                     "org": org,
                     "region": data.get("region", ""),
                     "city": data.get("city", ""),
+                    "country": (data.get("country") or "").upper(),
                 }
         except Exception as exc:
             logger.warning("Failed to get ASN info: %s", exc)
@@ -282,6 +289,14 @@ class ISPProfiler:
             "vimpelcom": "beeline",
             "tattelecom": "tattelecom",
             "таттелеком": "tattelecom",
+            "er-telecom": "er-telecom",
+            "ertelecom": "er-telecom",
+            "dom.ru": "er-telecom",
+            "transtelecom": "ttk",
+            "ттк": "ttk",
+            "netbynet": "netbynet",
+            "ufanet": "ufanet",
+            "yota": "yota",
         }
         for keyword, isp_name in keywords.items():
             if keyword in org_lower:

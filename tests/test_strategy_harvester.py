@@ -74,12 +74,16 @@ class TestTranslateZapretV1(unittest.TestCase):
         self.assertIn("seqovl_pattern=fake_default_tls", flags[0])
 
     def test_fooling_md5sig_appended(self):
+        # zapret2 uses "tcp_md5", not the invalid "fool=md5sig" the old
+        # translator emitted (fool= names a custom Lua function).
         flags = translate_zapret_v1({
             "--dpi-desync": "fake",
             "--dpi-desync-fooling": "md5sig",
             "--dpi-desync-ttl": "4",
         })
-        self.assertIn("fool=md5sig", flags[0])
+        self.assertIn("tcp_md5", flags[0])
+        self.assertNotIn("fool=md5sig", flags[0])
+        self.assertIn("ip_ttl=4", flags[0])
 
 
 class TestParseCliArgs(unittest.TestCase):

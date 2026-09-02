@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional
 
+from brain.netenv import CURL_DIRECT
 logger = logging.getLogger("svoboda.classifier")
 
 
@@ -226,7 +227,7 @@ class BlockageClassifier:
         """Quick HTTPS check — used to verify if 'blocked' domain is actually reachable."""
         try:
             result = subprocess.run(
-                ["curl", "-s", "--ssl-no-revoke", "--max-time", "5",
+                ["curl", "-s", *CURL_DIRECT, "--ssl-no-revoke", "--max-time", "5",
                  f"https://{host}",
                  "-o", "NUL" if self._is_windows else "/dev/null",
                  "-w", "%{http_code}"],
@@ -330,7 +331,7 @@ class BlockageClassifier:
         """Test HTTP (port 80) — if this works, IP is not blocked."""
         try:
             result = subprocess.run(
-                ["curl", "-s", "--max-time", "3", f"http://{host}",
+                ["curl", "-s", *CURL_DIRECT, "--max-time", "3", f"http://{host}",
                  "-o", "NUL" if self._is_windows else "/dev/null",
                  "-w", "%{http_code}"],
                 capture_output=True, text=True, timeout=5,
@@ -359,7 +360,7 @@ class BlockageClassifier:
             fmt = "%{http_code}|%{time_connect}|%{time_appconnect}|%{time_starttransfer}|%{time_total}|%{size_download}"
             result = subprocess.run(
                 [
-                    "curl", "-s", "--ssl-no-revoke",
+                    "curl", "-s", *CURL_DIRECT, "--ssl-no-revoke",
                     "--max-time", str(self.timeout),
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
@@ -411,7 +412,7 @@ class BlockageClassifier:
             # Download 64KB — tests if connection stays alive after handshake
             result = subprocess.run(
                 [
-                    "curl", "-s", "--ssl-no-revoke",
+                    "curl", "-s", *CURL_DIRECT, "--ssl-no-revoke",
                     "--max-time", str(self.timeout + 3),
                     "-r", "0-65535",
                     f"https://{host}",

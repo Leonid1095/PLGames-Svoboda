@@ -1,6 +1,8 @@
 __pycache__/
 *.pyc
 *.pyo
+# GUI<->engine IPC (status.json), regenerated each run
+runtime/
 *.log
 *.log.*
 *.db
@@ -14,6 +16,8 @@ hostlist.txt
 hostlist-auto.txt
 hostlist-backup-*.txt
 harvested_strategies.json
+# fake/pattern blobs fetched by the harvester (Flowseal bin/)
+blobs/
 host_strategies.json
 .env
 .env.local
@@ -36,5 +40,10 @@ bin/
 .install_id
 zapret2-*/
 _research/
-.claude/
+# .claude/settings.json holds machine-local Claude Code config INCLUDING proxy
+# credentials — it must never be committed. The rules and agent definitions are
+# project instructions (CLAUDE.md refers to them), so those stay trackable.
+.claude/*
+!.claude/rules/
+!.claude/agents/
 svoboda.log*

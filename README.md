@@ -12,9 +12,9 @@ No VPN tunnel. No proxy server. Pure local packet manipulation.
 <br>
 
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2B-0078D4?style=for-the-badge&logo=windows)
-![Engine](https://img.shields.io/badge/Engine-zapret2%20%2B%20WinDivert-2EA44F?style=for-the-badge)
+![Engine](https://img.shields.io/badge/Engine-zapret2%20v1.0.4%20%2B%20WinDivert-2EA44F?style=for-the-badge)
 ![AI](https://img.shields.io/badge/AI-Strategy%20Engineer-8B5CF6?style=for-the-badge)
-![Tests](https://img.shields.io/badge/Tests-184%20passing-brightgreen?style=for-the-badge)
+![Tests](https://img.shields.io/badge/Tests-328%20passing-brightgreen?style=for-the-badge)
 ![License](https://img.shields.io/badge/License-MIT-EAB308?style=for-the-badge)
 
 </div>
@@ -145,7 +145,7 @@ Once a working strategy is found, it's **monitored 24/7**, **shared anonymously*
 | QUIC auto-block | ✅ | ❌ | partial | ❌ | partial |
 | Cross-host learning (per-ISP) | ✅ | ❌ | ❌ | ❌ | ❌ |
 | Body-content verification | ✅ | ❌ | ❌ | ❌ | ❌ |
-| 184-test safety harness | ✅ | ❌ | ❌ | ❌ | ❌ |
+| 328-test safety harness | ✅ | ❌ | ❌ | ❌ | ❌ |
 
 > Other tools give you a config. **Svoboda *is* the config — it writes itself.**
 
@@ -212,7 +212,7 @@ brain/
   └─ tier.py                      Subscription management
 lua/                              Custom zapret2 lua extensions (alpn_strip, tls_morph)
 server/api.py                     FastAPI intelligence layer (NOT a tunnel)
-tests/                            184 unit tests (security, compilation, logic, parsers)
+tests/                            328 unit tests (security, compilation, logic, parsers, DNS, lint)
 zapret2-v0.9.4.5/                 Bundled DPI bypass engine
 ```
 
@@ -312,7 +312,7 @@ No paywalls. The tool is identical for free and paid users. Paid tiers just get 
 PRs welcome. Before submitting:
 
 ```bash
-python -m pytest tests/ -v                                       # all 184 tests must pass
+python -m pytest tests/ -v                                       # all 328 tests must pass
 python -c "import py_compile; py_compile.compile('run_real.py', doraise=True)"   # syntax check
 ```
 

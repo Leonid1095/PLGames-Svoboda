@@ -12,9 +12,11 @@ Modeled after zapret2 blockcheck2.sh approach:
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from brain.tester import ConnectionTester
+from brain.netenv import tcp_timestamps_enabled
 
 logger = logging.getLogger("svoboda.enumerator")
 
@@ -98,6 +100,54 @@ KNOWN_STRATEGIES: list[dict] = [
     # ISPs without triggering fake-packet detection. seqovl_pattern uses our
     # fake_default_tls blob (equivalent to their tls_clienthello_*.bin files).
     # ══════════════════════════════════════════════════════════════════
+    # ══════════════════════════════════════════════════════════════════
+    # 2026-09 refresh — no-fake candidates from Flowseal 1.10.2 (Aug 2026)
+    # and klondike0x zapret2 presets. Blobs (tls_google) are loaded via
+    # --blob from the engine's files/fake (see brain/zapret_blobs.py).
+    # ══════════════════════════════════════════════════════════════════
+    {
+        "name": "flowseal_1102_google_681_realpat_ipid0",
+        "flags": [
+            "multisplit:pos=1:seqovl=681:seqovl_pattern=tls_google:ip_id=zero",
+        ],
+        "desc": "Flowseal 1.10.2 list-google: seqovl=681 + REAL google ClientHello + ip_id=zero (TSPU ip_id-repeat trigger)",
+    },
+    {
+        "name": "flowseal_1102_general_568_realpat",
+        "flags": [
+            "multisplit:pos=1:seqovl=568:seqovl_pattern=tls_google",
+        ],
+        "desc": "Flowseal 1.10.2 general: seqovl=568 pos=1 with a real ClientHello overlap pattern",
+    },
+    {
+        "name": "nofake_568_ipid0_disorder",
+        "flags": [
+            "multisplit:pos=1:seqovl=568:ip_id=zero",
+            "multidisorder:pos=1,midsld:ip_id=zero",
+        ],
+        "desc": "Proven er-telecom pair + ip_id=zero (Windows re-numbers IDs, defeats repeat-ip_id detection)",
+    },
+    {
+        "name": "flowseal_alt2_652_pos2_realpat",
+        "flags": [
+            "multisplit:pos=2:seqovl=652:seqovl_pattern=tls_google",
+        ],
+        "desc": "Flowseal ALT2: multisplit pos=2 seqovl=652 with real ClientHello",
+    },
+    {
+        "name": "flowseal_alt7_679_sniext",
+        "flags": [
+            "multisplit:pos=2,sniext+1:seqovl=679:seqovl_pattern=tls_google",
+        ],
+        "desc": "Flowseal ALT7: split at 2 and sniext+1, seqovl=679 real ClientHello",
+    },
+    {
+        "name": "klondike_rtk_multidisorder_7pos_seqovl1",
+        "flags": [
+            "multidisorder:pos=1,host+2,sld+2,sld+5,sniext+1,sniext+2,endhost-2:seqovl=1",
+        ],
+        "desc": "klondike0x Rostelecom no-fake preset: 7-point multidisorder with seqovl=1",
+    },
     {
         "name": "flowseal_v197_alt6_split681_pat",
         "flags": [
@@ -134,7 +184,11 @@ KNOWN_STRATEGIES: list[dict] = [
         "name": "flowseal_v197_hostfakesplit_yaru",
         "flags": [
             "fake:blob=fake_default_tls:ip_ttl=4:ip6_ttl=4:tcp_ts_up:repeats=4:tls_mod=rnd,dupsid,sni=ya.ru",
-            "hostfakesplit:host=ya.ru,altorder=1",
+            # zapret v1's "altorder=1" has no zapret2 equivalent. Left in, it was
+            # parsed as part of the host TEMPLATE ("ya.ru,altorder=1"), so the
+            # generated fake host was garbage. The linter cannot catch this: it
+            # validates argument names, not values.
+            "hostfakesplit:host=ya.ru",
         ],
         "desc": "Flowseal v1.9.7 ALT3: hostfakesplit with ya.ru SNI/host spoof",
         "tags": ["discord_2026_proven", "per_host"],
@@ -642,9 +696,12 @@ KNOWN_STRATEGIES: list[dict] = [
         "name": "wssize1_oob_split",
         "flags": [
             "wssize:wsize=1:scale=0",
-            "oob:pos=1",
+            "oob",
             "multisplit:pos=1:seqovl=4096",
         ],
+        # zapret2's oob takes char/byte/urp, NOT pos: it always inserts the OOB
+        # byte into the first non-empty payload. The old "oob:pos=1" was an
+        # invalid argument (caught by brain/strategy_lint.py, 2026-09).
         "desc": "Tiny window + TCP OOB byte + 4KB overlap (confuses DPI parser)",
     },
     {
@@ -708,6 +765,26 @@ KNOWN_STRATEGIES: list[dict] = [
 ]
 
 
+def _uses_tcp_ts(flags) -> bool:
+    return any("tcp_ts=" in str(f) for f in (flags or []))
+
+
+# Project root, so linting works regardless of the process cwd. Launched from
+# the scheduled task the cwd is not the project, and a cwd-relative lookup would
+# silently find no engine lua and pass every strategy.
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+
+
+def _lint_strategy(flags) -> list[str]:
+    """Static validation against the installed engine. [] when it cannot check."""
+    try:
+        from brain.strategy_lint import lint
+        return lint(flags, _PROJECT_ROOT)
+    except Exception as exc:          # linting must never block enumeration
+        logger.debug("Strategy lint unavailable: %s", exc)
+        return []
+
+
 class StrategyEnumerator:
     """Deterministic strategy enumeration (blockcheck2-style).
 
@@ -717,7 +794,8 @@ class StrategyEnumerator:
 
     def __init__(self, strategies: Optional[list[dict]] = None,
                  excluded_functions: Optional[set[str]] = None,
-                 include_harvested: bool = False):
+                 include_harvested: bool = False,
+                 require_tcp_timestamps: Optional[bool] = None):
         base = list(strategies) if strategies is not None else list(KNOWN_STRATEGIES)
         if include_harvested and strategies is None:
             try:
@@ -725,17 +803,47 @@ class StrategyEnumerator:
                 harvested = harvest_safe()
                 seen = {"|".join(s["flags"]) for s in base}
                 added = 0
+                rejected = 0
                 for h in harvested:
                     sig = "|".join(h["flags"])
                     if sig in seen:
                         continue
+                    # Upstream syntax drifts (Flowseal follows zapret v1, we run
+                    # zapret2). A strategy winws2 would reject or silently skip
+                    # must never enter the pool: it would burn a ~30s test slot
+                    # and record a bogus zero. See brain/strategy_lint.py.
+                    problems = _lint_strategy(h["flags"])
+                    if problems:
+                        rejected += 1
+                        logger.warning("Rejected harvested strategy %s: %s",
+                                       h.get("name", "?"), problems[0])
+                        continue
                     seen.add(sig)
                     base.append(h)
                     added += 1
-                if added:
-                    logger.info("Harvester added %d new strategies (total: %d)", added, len(base))
+                if added or rejected:
+                    logger.info("Harvester added %d new strategies (%d rejected as invalid, total: %d)",
+                                added, rejected, len(base))
             except ImportError:
                 pass
+            except Exception as exc:
+                # Harvesting is an optimisation; the built-in pool must still
+                # work. A corrupt cache or a lint failure must never stop the
+                # enumerator from running, or there is no bypass at all.
+                logger.warning("Harvest skipped (%s): using built-in strategies only", exc)
+                base = list(KNOWN_STRATEGIES)
+        # tcp_ts fooling needs the TCP Timestamp option, which Windows 11
+        # disables by default: such strategies are dead weight there.
+        if require_tcp_timestamps is None:
+            try:
+                require_tcp_timestamps = tcp_timestamps_enabled()
+            except Exception:
+                require_tcp_timestamps = None
+        if require_tcp_timestamps is False:
+            kept = [s for s in base if not _uses_tcp_ts(s.get("flags", []))]
+            if len(kept) != len(base):
+                logger.info("TCP timestamps disabled on this host - skipping %d tcp_ts strategies", len(base) - len(kept))
+            base = kept
         self.strategies = base
         self.excluded_functions = excluded_functions or set()
         # Outcome of the last enumerate() call. Lets the caller distinguish

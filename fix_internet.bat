@@ -20,6 +20,8 @@ if %errorLevel% neq 0 (
 :: 0. Remove QUIC firewall block
 echo  [0/8] Removing QUIC firewall block...
 netsh advfirewall firewall delete rule name="Svoboda Block QUIC" >nul 2>&1
+:: Restore CRL/OCSP revocation check (Svoboda sets it to 0 while running)
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings" /v CertificateRevocation /t REG_DWORD /d 1 /f >nul 2>&1
 echo        Done
 
 :: 1. Kill winws2 + gost
@@ -36,6 +38,7 @@ if %errorLevel% equ 0 (
 ) else (
     echo        No gost.exe running
 )
+taskkill /F /IM ciadpi.exe >nul 2>&1
 
 :: 2. Stop WinDivert driver
 echo  [2/6] Unloading WinDivert driver...

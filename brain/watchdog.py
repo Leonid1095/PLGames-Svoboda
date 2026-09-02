@@ -9,6 +9,7 @@ import threading
 import time
 from typing import Callable, Optional
 
+from brain.netenv import CURL_DIRECT
 logger = logging.getLogger("svoboda.watchdog")
 
 
@@ -93,7 +94,7 @@ class WatchDog:
         try:
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", *CURL_DIRECT,
                     "--max-time", str(self._timeout),
                     f"https://{host}",
                     "-o", "/dev/null" if not self._is_windows else "NUL",

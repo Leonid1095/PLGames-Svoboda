@@ -32,13 +32,22 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from brain.netenv import CURL_DIRECT
 logger = logging.getLogger("svoboda.ech")
 
-# DoH providers ordered by reliability (Cloudflare usually not blocked in RU)
+# DoH providers (JSON API), ordered by reliability from inside RU.
+# - IP-URL variants sidestep SNI-based blocking of the DoH hostnames
+#   (Flowseal 1.10 even desyncs dns.google / cloudflare-dns.com for this reason).
+# - Google JSON lives at /resolve (the /dns-query endpoint is wire-format only,
+#   so the old entry never worked); Quad9 JSON is on port 5053.
 DOH_PROVIDERS = [
     ("Cloudflare", "https://cloudflare-dns.com/dns-query"),
-    ("Google", "https://dns.google/dns-query"),
-    ("Quad9", "https://dns.quad9.net/dns-query"),
+    ("Cloudflare-IP", "https://1.1.1.1/dns-query"),
+    ("Google", "https://dns.google/resolve"),
+    ("Google-IP", "https://8.8.8.8/resolve"),
+    ("Quad9", "https://dns.quad9.net:5053/dns-query"),
+    ("AdGuard", "https://dns.adguard-dns.com/resolve"),
+    ("Mozilla", "https://mozilla.cloudflare-dns.com/dns-query"),
 ]
 
 # DNS record type for HTTPS/SVCB (contains ECHConfig)
@@ -121,7 +130,7 @@ class DoHResolver:
 
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", *CURL_DIRECT,
                     "--max-time", str(self._timeout),
                     "-H", "Accept: application/dns-json",
                     full_url,

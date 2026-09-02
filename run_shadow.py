@@ -129,6 +129,10 @@ def main():
     signal.signal(signal.SIGINT, _signal_handler)
     signal.signal(signal.SIGTERM, _signal_handler)
 
+    # Direct-path measurements only (see brain/netenv.py)
+    from brain.netenv import scrub_proxy_env
+    scrub_proxy_env()
+
     # Load config
     config = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
     config["_base_dir"] = str(BASE_DIR)

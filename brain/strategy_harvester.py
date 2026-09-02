@@ -84,16 +84,52 @@ SOURCES: list[dict] = [
         "parser": "zapret_v1_bat",
         "tags": ["harvested", "flowseal", "alt7"],
     },
+    # ALT8-13 added 2026-09: newest Flowseal profiles (hostfakesplit, fake-tls-mod,
+    # ts fooling) — now translatable since _translate_single learned those.
+    {
+        "name": "Flowseal/general-alt9",
+        "url": "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/general%20(ALT9).bat",
+        "parser": "zapret_v1_bat",
+        "tags": ["harvested", "flowseal", "alt9"],
+    },
+    {
+        "name": "Flowseal/general-alt11",
+        "url": "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/general%20(ALT11).bat",
+        "parser": "zapret_v1_bat",
+        "tags": ["harvested", "flowseal", "alt11"],
+    },
+    {
+        "name": "Flowseal/general-alt13",
+        "url": "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/general%20(ALT13).bat",
+        "parser": "zapret_v1_bat",
+        "tags": ["harvested", "flowseal", "alt13"],
+    },
+    {
+        "name": "Flowseal/general-fake-tls-auto",
+        "url": "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/general%20(FAKE%20TLS%20AUTO).bat",
+        "parser": "zapret_v1_bat",
+        "tags": ["harvested", "flowseal", "fake-tls-auto"],
+    },
 ]
+
+# Flowseal ships its real-ClientHello / QUIC / STUN blobs in bin/. When a
+# harvested strategy references one (seqovl_pattern=tls_clienthello_4pda_to,
+# blob=...), the .bin must be present or zapret2 v1.0.4 skips that packet
+# (VERDICT_PASS). We mirror them into <project>/blobs/ where brain.zapret_blobs
+# discovers them.
+FLOWSEAL_BLOB_BASE = "https://raw.githubusercontent.com/Flowseal/zapret-discord-youtube/main/bin/"
+_SAFE_BLOB_NAME = re.compile(r"^[A-Za-z0-9._-]+\.bin$")
 
 
 # ─── Translator: zapret v1 → zapret2 lua syntax ────────────────────
 
-def translate_zapret_v1(args: dict[str, str]) -> Optional[list[str]]:
+def translate_zapret_v1(args: dict[str, str], blobs: Optional[set] = None) -> Optional[list[str]]:
     """Translate zapret v1 CLI flags → zapret2 lua-desync flags.
 
     Returns None if any function in the desync chain is unsupported —
-    we'd rather skip than guess and break.
+    we'd rather skip than guess and break. When ``blobs`` is provided, the
+    names of any referenced blob files (real ClientHello patterns, fake TLS
+    blobs) are added to it so the caller can fetch them.
     """
     desync_chain = args.get("--dpi-desync", "")
     if not desync_chain:
@@ -110,7 +146,7 @@ def translate_zapret_v1(args: dict[str, str]) -> Optional[list[str]]:
         func = func.strip()
         if not func:
             continue
-        translated = _translate_single(func, pos, repeats, ttl, fooling, args)
+        translated = _translate_single(func, pos, repeats, ttl, fooling, args, blobs)
         if translated is None:
             logger.debug("Skip strategy: unsupported desync function %r", func)
             return None
@@ -119,46 +155,146 @@ def translate_zapret_v1(args: dict[str, str]) -> Optional[list[str]]:
     return flags if flags else None
 
 
+# zapret v1 --dpi-desync-fooling → zapret2 standard-fooling tokens.
+# Verified against zapret2-v1.0.4/lua/zapret-antidpi.lua (lines 20-45): the
+# fooling vocabulary is tcp_seq/tcp_ack/tcp_ts/tcp_md5/badsum, NOT "fool=badseq"
+# (fool= names a custom Lua function). The old translator emitted fool=md5sig /
+# fool=badseq, which winws2 rejects — every harvested fake strategy was broken.
+_FOOLING_MAP: dict[str, str] = {
+    "md5sig": "tcp_md5",
+    "badseq": "tcp_seq=-10000",
+    "badack": "tcp_ack=-66000",
+    "ts": "tcp_ts=-600000",     # Flowseal's dominant fooling (17/22 profiles)
+    "badsum": "badsum",
+}
+# Foolings with no zapret2 standard-fooling equivalent — dropped (the candidate
+# is still tested before use), never guessed.
+_FOOLING_IGNORED = frozenset({"datanoack", "hostcase", "hosttcp", "none", ""})
+
+
+def _fooling_parts(fooling: str, ttl: str) -> list[str]:
+    parts: list[str] = []
+    for tok in (fooling or "").split(","):
+        tok = tok.strip().lower()
+        if not tok or tok in _FOOLING_IGNORED:
+            continue
+        mapped = _FOOLING_MAP.get(tok)
+        if mapped:
+            parts.append(mapped)
+    if ttl:
+        try:
+            # CLAUDE.md: fake TTL minimum 3 (CDN edges sit at hops 5-8).
+            ttl_n = max(3, int(ttl))
+            parts.append(f"ip_ttl={ttl_n}")
+            parts.append(f"ip6_ttl={ttl_n}")
+        except ValueError:
+            pass
+    return parts
+
+
+def _ip_id_part(args: dict) -> list[str]:
+    """--ip-id=zero|seq|rnd|none → ip_id=... (zapret2 standard ipid).
+
+    ip_id=zero matters on TSPU: it triggers a block when a fake and a real
+    packet repeat the same non-zero IP-ID (bol-van readme). Windows then
+    re-numbers the zeros sequentially.
+    """
+    val = (args.get("--ip-id", "") or "").strip().lower()
+    return [f"ip_id={val}"] if val in ("zero", "seq", "rnd", "none") else []
+
+
+def _pattern_part(args: dict, blobs: Optional[set] = None) -> Optional[str]:
+    """seqovl-pattern → seqovl_pattern=<blob>. Preserves REAL ClientHello blobs.
+
+    The old translator collapsed every pattern to fake_default_tls, discarding
+    exactly what makes Flowseal's split effective (a real google/4pda
+    ClientHello in the overlap). We keep the blob NAME; the blob file is loaded
+    via --blob (see brain/zapret_blobs) and recorded in ``blobs`` for fetching.
+    """
+    raw = args.get("--dpi-desync-split-seqovl-pattern", "")
+    if not raw:
+        return None
+    raw = raw.strip().strip('"')
+    if raw.startswith("0x"):
+        return f"seqovl_pattern={raw}"        # inline hex literal, pass through
+    from brain.zapret_blobs import blob_name
+    name = blob_name(raw)
+    if blobs is not None:
+        blobs.add(raw)
+    return f"seqovl_pattern={name}"
+
+
+def _fake_blob_part(args: dict, blobs: Optional[set] = None) -> str:
+    """--dpi-desync-fake-tls=<file|hex|!> → blob=<name> (default fake_default_tls)."""
+    raw = (args.get("--dpi-desync-fake-tls", "") or "").split(",")[0].strip().strip('"')
+    if not raw or raw in ("!", "^!", "0x00000000"):
+        return "blob=fake_default_tls"
+    if raw.startswith("0x"):
+        return f"blob={raw}"
+    from brain.zapret_blobs import blob_name
+    if blobs is not None:
+        blobs.add(raw)
+    return f"blob={blob_name(raw)}"
+
+
 def _translate_single(
     func: str, pos: str, repeats: str, ttl: str, fooling: str, args: dict,
+    blobs: Optional[set] = None,
 ) -> Optional[str]:
     seqovl = args.get("--dpi-desync-split-seqovl", "")
-    has_pattern = bool(args.get("--dpi-desync-split-seqovl-pattern", ""))
+    pattern = _pattern_part(args, blobs)
+    fooling_parts = _fooling_parts(fooling, ttl)
+    ipid = _ip_id_part(args)
 
-    if func == "split" or func == "split2":
-        return f"multisplit:pos={pos}"
-    if func == "disorder" or func == "disorder2":
-        return f"multidisorder:pos={pos},midsld"
+    if func in ("split", "split2"):
+        parts = [f"pos={pos}"] + ipid
+        return f"multisplit:{':'.join(parts)}"
+    if func in ("disorder", "disorder2"):
+        parts = [f"pos={pos},midsld"] + ipid
+        return f"multidisorder:{':'.join(parts)}"
     if func == "multisplit":
         parts = [f"pos={pos}"]
         if seqovl:
             parts.append(f"seqovl={seqovl}")
-            if has_pattern:
-                parts.append("seqovl_pattern=fake_default_tls")
+            parts.append(pattern or "seqovl_pattern=fake_default_tls")
+        parts += ipid
         return f"multisplit:{':'.join(parts)}"
     if func == "multidisorder":
         parts = [f"pos={pos},midsld"]
         if seqovl:
             parts.append(f"seqovl={seqovl}")
-            if has_pattern:
-                parts.append("seqovl_pattern=fake_default_tls")
+            parts.append(pattern or "seqovl_pattern=fake_default_tls")
+        parts += ipid
         return f"multidisorder:{':'.join(parts)}"
     if func == "fake":
-        parts = ["blob=fake_default_tls", f"repeats={repeats}"]
-        if ttl:
-            parts.append(f"ip_ttl={ttl}")
-            parts.append(f"ip6_ttl={ttl}")
-        if "md5sig" in fooling:
-            parts.append("fool=md5sig")
-        elif "badseq" in fooling:
-            parts.append("fool=badseq")
+        parts = [_fake_blob_part(args, blobs), f"repeats={repeats}"]
+        mod = (args.get("--dpi-desync-fake-tls-mod", "") or "").strip().strip('"')
+        if mod and mod.lower() != "none":
+            parts.append(f"tls_mod={mod}")
+        parts += fooling_parts + ipid
         return f"fake:{':'.join(parts)}"
+    # fakedsplit/fakeddisorder become plain split/disorder with a fake blob in
+    # the overlap. Fooling is NOT carried over: zapret2 applies fooling to the
+    # packets a function GENERATES, and these generate real data segments -- an
+    # ip_ttl or bad tcp_seq on those would stop the request reaching the server.
     if func == "fakedsplit":
-        return f"multisplit:pos={pos}:seqovl=681:seqovl_pattern=fake_default_tls"
+        parts = [f"pos={pos}", "seqovl=681", pattern or "seqovl_pattern=fake_default_tls"] + ipid
+        return f"multisplit:{':'.join(parts)}"
     if func == "fakeddisorder":
-        return f"multidisorder:pos={pos},midsld:seqovl=681:seqovl_pattern=fake_default_tls"
+        parts = [f"pos={pos},midsld", "seqovl=681", pattern or "seqovl_pattern=fake_default_tls"] + ipid
+        return f"multidisorder:{':'.join(parts)}"
+    if func == "hostfakesplit":
+        # Flowseal: --dpi-desync-hostfakesplit-mod=host=www.google.com,altorder=1
+        mod = args.get("--dpi-desync-hostfakesplit-mod", "")
+        host = "www.google.com"
+        for kv in mod.split(","):
+            kv = kv.strip()
+            if kv.startswith("host="):
+                host = kv[5:] or host  # altorder=1 has no zapret2 equivalent — dropped
+        parts = [f"host={host}", f"repeats={repeats}"] + fooling_parts + ipid
+        return f"hostfakesplit:{':'.join(parts)}"
     if func == "syndata":
-        return None
+        return "syndata"       # valid zapret2 function (used in KNOWN_STRATEGIES)
     return None
 
 
@@ -204,7 +340,8 @@ def parse_zapret_v1_bat(content: str, source_name: str, tags: list[str]) -> list
         sub_profiles = re.split(r"\s+--new\s+", big_args_str)
         for idx, sub in enumerate(sub_profiles):
             args = _parse_cli_args(sub)
-            flags = translate_zapret_v1(args)
+            blobs: set[str] = set()
+            flags = translate_zapret_v1(args, blobs)
             if not flags:
                 continue
             signature = "|".join(flags)
@@ -223,6 +360,7 @@ def parse_zapret_v1_bat(content: str, source_name: str, tags: list[str]) -> list
                 "desc": f"Harvested from {source_name}: profile {idx} ({hint})",
                 "tags": list(tags),
                 "source": source_name,
+                "blobs": sorted(blobs),
             })
     return strategies
 
@@ -272,6 +410,67 @@ def _fetch(url: str) -> Optional[str]:
         return None
 
 
+def _fetch_bytes(url: str) -> Optional[bytes]:
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(req, timeout=FETCH_TIMEOUT) as resp:
+            return resp.read()
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as exc:
+        logger.warning("Blob fetch failed %s: %s", url, exc)
+        return None
+
+
+def fetch_blobs(blob_files: set, base_dir: Optional[Path] = None) -> int:
+    """Mirror referenced Flowseal blob files into <base_dir>/blobs/.
+
+    ``blob_files`` holds raw pattern strings as they appeared on the command
+    line (e.g. "%BIN%tls_clienthello_4pda_to.bin" or "tls_clienthello_max_ru.bin").
+    Only .bin basenames are fetched; already-present files and engine-shipped
+    blobs are skipped. Returns the count newly downloaded. Never raises.
+    """
+    root = Path(base_dir) if base_dir else Path(__file__).resolve().parent.parent
+    blob_dir = root / "blobs"
+    names: set[str] = set()
+    for raw in blob_files or ():
+        raw = str(raw).strip().strip('"')
+        if raw.startswith("0x") or not raw:
+            continue
+        # Strip a %BIN% env-var prefix and any path, keeping the basename.
+        base = raw.replace("\\", "/").split("/")[-1].rsplit("%", 1)[-1]
+        # Whitelist the result. These names come from a third-party repo and are
+        # written by an admin process: "C:foo.bin" would slip past a separator
+        # strip, because Path("blobs") / "C:foo.bin" discards the left operand.
+        if not _SAFE_BLOB_NAME.match(base):
+            logger.warning("Ignoring unsafe blob filename %r", raw)
+            continue
+        names.add(base)
+    if not names:
+        return 0
+    # Skip blobs the engine already ships (found by brain.zapret_blobs).
+    try:
+        from brain.zapret_paths import find_zapret_dirs
+        zdirs = [d / "files" / "fake" for d in find_zapret_dirs(root)]
+        engine_have = {p.name for d in zdirs if d.is_dir() for p in d.glob("*.bin")}
+    except Exception:
+        engine_have = set()
+    downloaded = 0
+    for name in sorted(names):
+        dest = blob_dir / name
+        if dest.exists() or name in engine_have:
+            continue
+        data = _fetch_bytes(FLOWSEAL_BLOB_BASE + name)
+        if data and len(data) < 65536:      # ClientHello/QUIC blobs are tiny
+            try:
+                blob_dir.mkdir(parents=True, exist_ok=True)
+                dest.write_bytes(data)
+                downloaded += 1
+            except OSError as exc:
+                logger.warning("Blob write failed %s: %s", name, exc)
+    if downloaded:
+        logger.info("Fetched %d blob file(s) into %s", downloaded, blob_dir)
+    return downloaded
+
+
 def harvest(force_refresh: bool = False, cache_path: Optional[Path] = None) -> list[dict]:
     """Returns harvested strategies, cached on disk for CACHE_TTL_SECONDS.
 
@@ -313,6 +512,17 @@ def harvest(force_refresh: bool = False, cache_path: Optional[Path] = None) -> l
         "Harvested %d strategies from %d/%d sources",
         len(all_strategies), sources_ok, len(SOURCES),
     )
+
+    # Mirror referenced blob files (real ClientHello patterns) so the strategies
+    # that use them actually work instead of being silently VERDICT_PASS'd.
+    try:
+        needed: set[str] = set()
+        for s in all_strategies:
+            needed.update(s.get("blobs", []))
+        if needed:
+            fetch_blobs(needed)
+    except Exception as exc:
+        logger.debug("Blob fetch skipped: %s", exc)
 
     if all_strategies:
         try:

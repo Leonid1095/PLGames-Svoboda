@@ -153,90 +153,24 @@ if exist ".git" (
 )
 :skip_self_update
 
-:: ─── zapret2 binaries ─────────────────────────────────────────
-set ZAPRET_DIR=zapret2
-set ZAPRET_BIN=%ZAPRET_DIR%\binaries\windows-x86_64\winws2.exe
-set ZAPRET_REPO=https://github.com/bol-van/zapret2.git
-
-:: Check if zapret2 dir exists with git
-if exist "%ZAPRET_DIR%\.git" goto :zapret_update
-
-:: Check if binary exists
-if exist "%ZAPRET_BIN%" goto :zapret_ok
-for /d %%d in (zapret2-*) do (
-    if exist "%%d\binaries\windows-x86_64\winws2.exe" (
-        set ZAPRET_BIN=%%d\binaries\windows-x86_64\winws2.exe
-        goto :zapret_ok
-    )
+:: ─── zapret2 engine (GitHub releases — binaries are NOT in the git repo) ──
+echo|set /p="  %MSG_ZAPRET_UPD% "
+python -m updater.zapret2_updater --quiet
+if %errorLevel% neq 0 echo  [SKIP] offline or download failed
+set ZAPRET_FOUND=0
+for /d %%d in (zapret2*) do (
+    if exist "%%d\binaries\windows-x86_64\winws2.exe" set ZAPRET_FOUND=1
 )
-
-:: Not found — clone or download
-echo.
-echo  [!] %MSG_ZAPRET_DL%
-echo.
-
-git --version >nul 2>&1
-if %errorLevel% equ 0 (
-    git clone --depth 1 "%ZAPRET_REPO%" "%ZAPRET_DIR%" 2>&1
-    if exist "%ZAPRET_BIN%" goto :zapret_ok
-)
-
-:: Fallback: download zip
-set ZAPRET_ZIP=zapret2-download.zip
-curl -L -o "%ZAPRET_ZIP%" "https://github.com/bol-van/zapret2/archive/refs/heads/main.zip" --progress-bar
-if %errorLevel% neq 0 (
-    echo  [ERROR] Download failed!
-    echo  https://github.com/bol-van/zapret2
+:: NOTE: no parentheses in the echo text below - inside an if-block cmd would
+:: read a literal ")" as the end of the block and fail with "was unexpected".
+if "%ZAPRET_FOUND%"=="0" (
+    echo  [ERROR] winws2.exe not found!
+    echo  Download the release zip from https://github.com/bol-van/zapret2/releases
+    echo  and extract it here, so that this path exists:
+    echo    zapret2-vX.Y.Z\binaries\windows-x86_64\winws2.exe
     pause
     exit /b 1
 )
-
-tar -xf "%ZAPRET_ZIP%" >nul 2>&1
-if %errorLevel% neq 0 (
-    powershell -Command "Expand-Archive -Path '%ZAPRET_ZIP%' -DestinationPath '.' -Force"
-)
-
-for /d %%d in (zapret2-*) do (
-    if not "%%d"=="zapret2" (
-        if exist "%%d\binaries" ren "%%d" "zapret2" >nul 2>&1
-    )
-)
-del "%ZAPRET_ZIP%" >nul 2>&1
-
-if exist "%ZAPRET_BIN%" goto :zapret_ok
-for /d %%d in (zapret2-*) do (
-    if exist "%%d\binaries\windows-x86_64\winws2.exe" (
-        set ZAPRET_BIN=%%d\binaries\windows-x86_64\winws2.exe
-        goto :zapret_ok
-    )
-)
-echo  [ERROR] winws2.exe not found!
-echo  https://github.com/bol-van/zapret2
-pause
-exit /b 1
-
-:zapret_update
-echo|set /p="  %MSG_ZAPRET_UPD% "
-pushd "%ZAPRET_DIR%"
-git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=5 fetch --depth 1 origin main >nul 2>&1
-if %errorLevel% neq 0 (
-    echo [SKIP]
-    popd
-    goto :zapret_ok
-)
-for /f %%h in ('git rev-parse HEAD') do set LOCAL_HEAD=%%h
-for /f %%h in ('git rev-parse origin/main') do set REMOTE_HEAD=%%h
-if not "%LOCAL_HEAD%"=="%REMOTE_HEAD%" (
-    echo.
-    echo|set /p="  Downloading zapret2 update... "
-    git reset --hard origin/main >nul 2>&1
-    echo [OK]
-) else (
-    echo [OK]
-)
-popd
-
-:zapret_ok
 echo  [OK] zapret2 binary found
 echo.
 
@@ -260,8 +194,10 @@ echo.
 echo  %MSG_TRAY%
 echo  %MSG_TRAY2%
 echo.
-pythonw svoboda_tray.py
-goto :done
+start "" pythonw run_gui.py
+:: Do NOT fall through to :done - it kills winws2, which would tear down the
+:: engine the GUI is starting. The GUI owns its own shutdown and cleanup.
+exit /b 0
 
 :console_mode
 echo.

@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from brain.netenv import CURL_DIRECT
 logger = logging.getLogger("svoboda.tester")
 
 
@@ -100,11 +101,28 @@ def _mock_fitness(flags: list[str]) -> float:
 # Successful HTTP codes (site responded, including 403 = server reachable)
 _SUCCESS_CODES = {200, 301, 302, 303, 307, 308, 403}
 
+# Deep-fetch sizing. TSPU's documented "16 KB freeze" lets ~16 KB (~25 packets)
+# through to suspect foreign/CDN IPs and then silently stalls the connection
+# (net4people/bbs#490). Requesting 64 KB makes the stall observable; a partial
+# body landing in the 8-32 KB window is the freeze signature.
+_DEEP_FETCH_BYTES = 65536
+_FREEZE_MIN_BYTES = 8 * 1024
+_FREEZE_MAX_BYTES = 32 * 1024
+# A Range request answered properly returns 206 Partial Content. It was missing
+# from _SUCCESS_CODES, so every server that honours Range (most CDNs) had its
+# deep fetch scored as a failure, penalising all strategies equally. Servers
+# that ignore Range answer 200 with the whole body, which is fine too.
+_DEEP_SUCCESS_CODES = _SUCCESS_CODES | {206}
+
 
 class ConnectionTester:
     """Connection quality tester for zapret2 lua-desync strategies."""
 
     def __init__(self, config: dict, mock: bool = True, hostlist_path: Optional[Path] = None):
+        if not mock:
+            # Real measurements must never go through HTTP(S)_PROXY
+            from brain.netenv import scrub_proxy_env
+            scrub_proxy_env()
         self.config = config
         self.mock = mock
         self.hosts: list[str] = config.get("test_hosts", ["youtube.com", "www.youtube.com", "discord.com", "cdn.discordapp.com"])
@@ -368,7 +386,11 @@ class ConnectionTester:
         fail_results = [r for r in results if not r.success]
         if fail_results:
             rst_count = sum(1 for r in fail_results if r.error_type == "rst")
-            timeout_count = sum(1 for r in fail_results if r.error_type == "timeout")
+            # A TSPU 16KB freeze is a stall, so it is weighted like a timeout:
+            # the handshake succeeded but the connection cannot carry video or a
+            # CDN download, which is exactly what the user would notice.
+            timeout_count = sum(1 for r in fail_results
+                                if r.error_type in ("timeout", "freeze16k", "truncated"))
             other_count = len(fail_results) - rst_count - timeout_count
             penalty_score = (rst_count * 1.0 + timeout_count * 0.6 + other_count * 0.3) / total
         else:
@@ -471,6 +493,13 @@ class ConnectionTester:
                     except Exception:
                         pass
 
+            # Named blobs referenced by the strategy (see brain/zapret_blobs.py)
+            try:
+                from brain.zapret_blobs import blob_args
+                cmd.extend(blob_args(flags, self._base_dir, self._lua_dir.parent, base))
+            except Exception as exc:
+                logger.debug("blob args skipped: %s", exc)
+
         # Hostlist: only apply desync to blocked domains (prevents breaking all traffic)
         if self._hostlist_path and self._hostlist_path.exists() and self._zapret_dir:
             import shutil
@@ -478,8 +507,21 @@ class ConnectionTester:
             try:
                 shutil.copy2(str(self._hostlist_path), str(local_hl))
                 cmd.append("--hostlist=hostlist.txt")
-            except Exception:
-                pass
+            except Exception as exc:
+                logger.debug("Shadow hostlist copy failed: %s", exc)
+            # The exclude list must apply here too. Without it, a GA/enum run --
+            # which lasts many minutes -- desyncs antivirus, banking and
+            # anti-cheat traffic that the permanent instance protects. That
+            # directly violates "NEVER add domains from list-exclude.txt to
+            # desync processing", and matters most when hostlist.txt came from
+            # the huge public blocklist fallback.
+            exclude_src = self._base_dir / "list-exclude.txt"
+            if exclude_src.exists():
+                try:
+                    shutil.copy2(str(exclude_src), str(self._zapret_dir / "list-exclude.txt"))
+                    cmd.append("--hostlist-exclude=list-exclude.txt")
+                except Exception as exc:
+                    logger.debug("Shadow exclude copy failed: %s", exc)
 
         # TLS filters (no --payload: process ALL packets, not just ClientHello)
         # This matches permanent mode and is critical for HTTP/2 streams
@@ -570,7 +612,7 @@ class ConnectionTester:
         t = timeout_override or self.timeout
         try:
             cmd = [
-                "curl", "-s",
+                "curl", "-s", *CURL_DIRECT,
                 "--ssl-no-revoke",
                 "--max-time", str(t),
                 f"https://{host}",
@@ -665,37 +707,77 @@ class ConnectionTester:
     # ─── Extended tests: HTTP/2 stream + WebSocket ──────────────────────────
 
     def _curl_test_h2_stream(self, host: str, timeout_override: int = 0) -> HostTestResult:
-        """Test HTTP/2 stream — download 64KB to detect strategies that break after handshake.
+        """Deep fetch (64 KB) — catches breakage that a handshake-only test misses.
 
-        Also detects bandwidth throttling: if 64KB takes > throttle_ms, TSPU is
-        likely throttling the stream even though the handshake succeeded.
+        Detects three distinct failures that all look like "success" to a
+        >512-byte body check:
+
+        * **16 KB freeze** — since June 2025 TSPU lets a TLS connection to
+          "suspect" foreign/CDN IPs pass ~16 KB (~25 packets) and then silently
+          stalls it, with no RST (net4people/bbs#490, youtubeUnblock#356,
+          zapret#2075). Signature: curl times out holding a partial body in the
+          8-32 KB window. Reported as error_type="freeze16k" and NOT a success —
+          such a connection cannot carry video or a CDN download.
+        * **truncated transfer** — timed out with some other partial body.
+        * **bandwidth throttling** — full body but slower than the threshold.
+
+        A genuinely short resource (server sends everything and closes, curl
+        exit 0) stays a clean success regardless of size.
         """
         timeout = timeout_override or 8
         try:
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", *CURL_DIRECT,
                     "--ssl-no-revoke",
                     "--max-time", str(timeout),
-                    "-r", "0-65535",
+                    "-r", f"0-{_DEEP_FETCH_BYTES - 1}",
                     f"https://{host}",
                     "-o", "NUL" if self._is_windows else "/dev/null",
-                    "-w", "%{http_code}|%{time_total}|%{speed_download}",
+                    "-w", "%{http_code}|%{time_total}|%{speed_download}|%{size_download}",
                 ],
                 capture_output=True, text=True, timeout=timeout + 3,
             )
             parts = result.stdout.strip().split("|")
-            http_code = int(parts[0]) if parts else 0
-            latency_ms = round(float(parts[1]) * 1000, 1) if len(parts) > 1 else 0.0
-            speed_bps = float(parts[2]) if len(parts) > 2 else 0.0
 
-            if http_code in _SUCCESS_CODES and (result.returncode == 0 or result.returncode == 28):
-                # Detect bandwidth throttling: 64KB at < 8 KB/s = clearly throttled
+            def _num(idx, cast=float, default=0.0):
+                try:
+                    return cast(float(parts[idx]))
+                except (ValueError, IndexError):
+                    return default
+
+            http_code = _num(0, int, 0)
+            latency_ms = round(_num(1) * 1000, 1)
+            speed_bps = _num(2)
+            size = _num(3, int, 0)
+            timed_out = result.returncode == 28
+
+            if http_code in _DEEP_SUCCESS_CODES and (result.returncode == 0 or timed_out):
+                if timed_out and size < _DEEP_FETCH_BYTES:
+                    # Stalled mid-transfer. The 8-32 KB window is the documented
+                    # TSPU freeze; anything else partial is a plain truncation.
+                    if _FREEZE_MIN_BYTES <= size <= _FREEZE_MAX_BYTES:
+                        logger.info(
+                            "Deep fetch %s: TSPU 16KB freeze (stalled at %d bytes after %.0fms)",
+                            host, size, latency_ms,
+                        )
+                        return HostTestResult(host=f"h2:{host}", success=False, http_code=http_code,
+                                              latency_ms=latency_ms, error_type="freeze16k")
+                    logger.debug("Deep fetch %s: truncated at %d bytes", host, size)
+                    return HostTestResult(host=f"h2:{host}", success=False, http_code=http_code,
+                                          latency_ms=latency_ms, error_type="truncated")
+
                 throttle_ms = getattr(self, "_throttle_ms", 3000)
-                is_throttled = latency_ms > throttle_ms or (speed_bps > 0 and speed_bps < 8192)
+                # Bytes/sec is only meaningful once a real body was transferred.
+                # A 301 with an empty body finishes in 400ms at ~0 B/s, which the
+                # old check called "throttled" and penalised (seen live on
+                # cloudflare.com). Judge small responses by latency alone.
+                slow_transfer = size >= _FREEZE_MIN_BYTES and 0 < speed_bps < 8192
+                is_throttled = latency_ms > throttle_ms or slow_transfer
                 error_type = "throttled" if is_throttled else ""
                 if is_throttled:
-                    logger.debug("H2 stream %s: throttled (%.0fms, %.0f B/s)", host, latency_ms, speed_bps)
+                    logger.debug("Deep fetch %s: throttled (%.0fms, %.0f B/s, %d bytes)",
+                                 host, latency_ms, speed_bps, size)
                 return HostTestResult(host=f"h2:{host}", success=True, http_code=http_code,
                                       latency_ms=latency_ms, error_type=error_type)
 
@@ -712,7 +794,7 @@ class ConnectionTester:
         try:
             result = subprocess.run(
                 [
-                    "curl", "-s",
+                    "curl", "-s", *CURL_DIRECT,
                     "--ssl-no-revoke",
                     "--max-time", str(timeout),
                     f"https://{host}",
@@ -779,6 +861,21 @@ class ConnectionTester:
         else:
             name = self.config.get("zapret_binary_linux", "nfqws2")
 
+        # Bundled release dirs first (newest version wins). Must match
+        # run_real._find_zapret_binary so the shadow tester and the permanent
+        # instance run the SAME winws2 build.
+        from brain.zapret_paths import newest_first
+        if self._is_windows:
+            for zdir in newest_first(self._base_dir.glob("zapret2*/binaries/windows-x86_64")):
+                if (zdir / name).exists():
+                    logger.info("Found zapret2 binary: %s", zdir / name)
+                    return zdir / name
+        else:
+            for zdir in newest_first(self._base_dir.glob("zapret2*/binaries/linux-*")):
+                if (zdir / "nfqws2").exists():
+                    logger.info("Found zapret2 binary: %s", zdir / "nfqws2")
+                    return zdir / "nfqws2"
+
         # Check PATH
         found = shutil.which(name)
         if found:
@@ -816,7 +913,8 @@ class ConnectionTester:
     def _resolve_lua_dir(self) -> Optional[Path]:
         """Find zapret2 Lua library directory."""
         # Search in zapret2 directory
-        for zdir in sorted(self._base_dir.glob("zapret2-*/lua"), reverse=True):
+        from brain.zapret_paths import newest_first
+        for zdir in newest_first(self._base_dir.glob("zapret2*/lua")):
             if (zdir / "zapret-lib.lua").exists():
                 logger.info("Found zapret2 Lua libs: %s", zdir)
                 return zdir
