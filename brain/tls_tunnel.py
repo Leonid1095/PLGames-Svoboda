@@ -6,7 +6,7 @@ methods (128, 130) that microsocks on VPS doesn't understand → "bad version".
 This tunnel speaks standard SOCKS5 RFC 1928 — no extensions, no surprises.
 
 Chain:
-  Local :1082 (SOCKS5) → TLS → proxy.svaboda-shwe.online:443 → microsocks :1080
+  Local :1082 (SOCKS5) → TLS → proxy.plg-us.duckdns.org:443 → microsocks :1080
 
 Usage:
     tunnel = TLSTunnel(remote_host, remote_port, user, password, local_port=1082)

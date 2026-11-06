@@ -28,7 +28,7 @@
   "fitness_apply_threshold": 0.7,
   "fitness_good_threshold": 0.85,
   "isp_check_interval_hours": 24,
-  "server_api_url": "https://api.svaboda-shwe.online",
+  "server_api_url": "https://api.plg-us.duckdns.org",
   "server_api_key": "",
   "sync_enabled": true,
   "telemetry_consent": true,

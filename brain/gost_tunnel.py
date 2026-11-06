@@ -4,7 +4,7 @@ Solves: ISP blocks all ports except 80/443/22, so raw SOCKS5 on :1080
 is unreachable. We tunnel SOCKS5 through TLS on :443 via nginx SNI routing.
 
 Chain:
-  Client: gost (local :1080) → TLS → proxy.svaboda-shwe.online:443
+  Client: gost (local :1080) → TLS → proxy.plg-us.duckdns.org:443
   VPS:    nginx SNI → stunnel (TLS termination) → microsocks (:1080)
 
 gost is a single Go binary (~15 MB), auto-downloaded on first use.
@@ -33,11 +33,11 @@ _GOST_FILENAME_LINUX = f"gost_{_GOST_VERSION}_linux_amd64.tar.gz"
 # Download sources (tried in order — GitHub may be blocked by DPI)
 _DOWNLOAD_URLS_WIN = [
     f"https://github.com/go-gost/gost/releases/download/v{_GOST_VERSION}/{_GOST_FILENAME_WIN}",
-    "https://api.svaboda-shwe.online/static/bin/" + _GOST_FILENAME_WIN,  # our mirror
+    "https://api.plg-us.duckdns.org/static/bin/" + _GOST_FILENAME_WIN,  # our mirror
 ]
 _DOWNLOAD_URLS_LINUX = [
     f"https://github.com/go-gost/gost/releases/download/v{_GOST_VERSION}/{_GOST_FILENAME_LINUX}",
-    "https://api.svaboda-shwe.online/static/bin/" + _GOST_FILENAME_LINUX,
+    "https://api.plg-us.duckdns.org/static/bin/" + _GOST_FILENAME_LINUX,
 ]
 
 # Local port for the SOCKS5 endpoint
@@ -158,8 +158,8 @@ class GostTunnel:
     def _build_remote_url(self, proxy_url: str) -> Optional[str]:
         """Convert config proxy URL to gost -F format with TLS.
 
-        Input:  socks5://user:pass@proxy.svaboda-shwe.online:443
-        Output: socks5://user:pass@proxy.svaboda-shwe.online:443?tls=true
+        Input:  socks5://user:pass@proxy.plg-us.duckdns.org:443
+        Output: socks5://user:pass@proxy.plg-us.duckdns.org:443?tls=true
         """
         try:
             # Remove scheme
